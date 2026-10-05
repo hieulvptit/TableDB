@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-transfer-save-finish"
+description = "Enables the transfer_save_finish command without any pre-configured scope."
+commands.allow = ["transfer_save_finish"]
+
+[[permission]]
+identifier = "deny-transfer-save-finish"
+description = "Denies the transfer_save_finish command without any pre-configured scope."
+commands.deny = ["transfer_save_finish"]

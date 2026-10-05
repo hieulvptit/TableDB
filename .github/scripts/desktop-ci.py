@@ -1,0 +1,118 @@
+"""Prepare native desktop resources and collect CI installers (stdlib only)."""
+
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+from urllib.parse import urlsplit
+
+ROOT = Path(__file__).resolve().parents[2]
+DESKTOP = ROOT / "apps/desktop"
+TAURI = DESKTOP / "src-tauri"
+JDBC = ROOT / "services/jdbc/target"
+
+
+def api_origin():
+    origin = os.environ.get("API_ORIGIN", "").strip()
+    parsed = urlsplit(origin)
+    # Accept an origin only: no path, credentials, query, fragment or whitespace.
+    if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
+            or parsed.password is not None or parsed.path or parsed.query or parsed.fragment
+            or any(c.isspace() or c in ";'\"<>\\" for c in origin)
+            or origin != f"https://{parsed.netloc}"):
+        raise ValueError("Set TABLEDB_API_ORIGIN repository variable or api_origin workflow input to https://host[:port]")
+    parsed.port  # Also reject malformed ports.
+    return origin
+
+
+def sha256(path):
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def prepare():
+    origin = api_origin()
+    jar = JDBC / "tabledb-jdbc.jar"
+    drivers = JDBC / "drivers"
+    manifest = json.loads((drivers / "manifest.json").read_text(encoding="utf-8"))
+    if not jar.is_file() or not manifest["drivers"]:
+        raise ValueError("JDBC jar or driver entries missing")
+    for driver in manifest["drivers"]:
+        path = drivers / driver["file"]
+        if path.parent != drivers or sha256(path) != driver["sha256"]:
+            raise ValueError(f"Invalid driver or checksum: {driver['file']}")
+
+    resources = TAURI / "resources"
+    sidecar = resources / "sidecar"
+    shutil.rmtree(sidecar, ignore_errors=True)
+    sidecar.mkdir(parents=True)
+    shutil.copy2(jar, sidecar / jar.name)
+    shutil.copytree(drivers, sidecar / "drivers")
+
+    jre = resources / "jre"
+    shutil.rmtree(jre, ignore_errors=True)
+    exe = ".exe" if sys.platform == "win32" else ""
+    java_bin = Path(os.environ["JAVA_HOME"]) / "bin"
+    modules = (
+        "java.base,java.logging,java.sql,java.naming,java.net.http,java.management,"
+        "java.security.jgss,java.security.sasl,java.xml,jdk.unsupported,"
+        "jdk.httpserver,jdk.crypto.ec,jdk.naming.dns"
+    )
+    subprocess.run([
+        str(java_bin / f"jlink{exe}"), "--add-modules", modules,
+        "--strip-debug", "--no-header-files", "--no-man-pages",
+        "--compress", "zip-6", "--output", str(jre),
+    ], check=True)
+    subprocess.run([str(jre / "bin" / f"java{exe}"), "-version"], check=True)
+    subprocess.run([
+        str(jre / "bin" / f"java{exe}"), "-jar", str(sidecar / jar.name), "--stdio",
+    ], input=b"", cwd=sidecar, check=True, timeout=30)
+
+    config = json.loads((TAURI / "tauri.conf.json").read_text(encoding="utf-8"))
+    directives = config["app"]["security"]["csp"].split(";")
+    for index, directive in enumerate(directives):
+        if directive.strip().startswith("connect-src "):
+            directives[index] = f" connect-src 'self' ipc: http://ipc.localhost {origin}"
+            break
+    else:
+        raise ValueError("Base CSP has no connect-src directive")
+    override = {
+        "app": {"security": {"csp": ";".join(directives)}},
+        "bundle": {"createUpdaterArtifacts": False},
+    }
+    if sys.platform == "win32":
+        override["bundle"]["windows"] = {
+            "webviewInstallMode": {"type": "offlineInstaller"},
+        }
+    (DESKTOP / "tauri.ci.json").write_text(json.dumps(override), encoding="utf-8")
+    sample_path = TAURI / "config.sample.json"
+    sample = json.loads(sample_path.read_text(encoding="utf-8"))
+    sample["apiBaseUrl"] = origin
+    sample_path.write_text(json.dumps(sample, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def collect():
+    bundle = TAURI / "target" / os.environ["BUILD_TARGET"] / "release/bundle"
+    output = ROOT / "desktop-artifacts"
+    shutil.rmtree(output, ignore_errors=True)
+    output.mkdir()
+    files = [path for path in bundle.rglob("*") if path.is_file()
+             and path.suffix in {".exe", ".dmg", ".deb", ".AppImage", ".rpm"}
+             and not any(part.endswith(".app") for part in path.relative_to(bundle).parts)]
+    if not files:
+        raise ValueError(f"No installers found in {bundle}")
+    for path in sorted(files):
+        destination = output / path.name
+        if destination.exists():
+            raise ValueError(f"Duplicate installer filename: {path.name}")
+        shutil.copy2(path, destination)
+    sums = [f"{sha256(path)}  {path.name}" for path in sorted(output.iterdir())]
+    (output / "SHA256SUMS.txt").write_text("\n".join(sums) + "\n", encoding="utf-8")
+
+
+if __name__ == "__main__":
+    commands = {"validate": api_origin, "prepare": prepare, "collect": collect}
+    commands[sys.argv[1]]()

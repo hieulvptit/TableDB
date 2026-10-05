@@ -1,0 +1,36 @@
+{
+  "env": "test",
+  "apiBaseUrl": "https://tabledb-api.test.example.vn",
+  "proxy": {
+    "url": null
+  },
+  "sidecar": {
+    "maxHeapMb": 512
+  },
+  "agent": {
+    "endpoints": [
+      {
+        "id": "vnpay-kimi",
+        "label": "VNPAY · Kimi",
+        "baseUrl": "https://genai.vnpay.vn/aigateway/llm_kimi/v1",
+        "models": [
+          "v_kimi"
+        ],
+        "description": "Gateway nội bộ VNPAY — mặc định, không gửi data ra ngoài"
+      },
+      {
+        "id": "vnpay-minimax",
+        "label": "VNPAY · MiniMax",
+        "baseUrl": "https://genai.vnpay.vn/aigateway/llm_minimax/v1",
+        "models": [
+          "v_minimax27"
+        ],
+        "description": "Gateway nội bộ VNPAY — không gửi data ra ngoài"
+      }
+    ],
+    "defaultEndpointId": "vnpay-kimi",
+    "defaultModel": "v_kimi",
+    "budgetChars": 12000,
+    "openMetadataUrl": null
+  }
+}

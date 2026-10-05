@@ -1,0 +1,15 @@
+{
+  "name": "@tabledb/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tauri 2 Windows shell for VNPAY TableDB",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-desktop.ps1",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

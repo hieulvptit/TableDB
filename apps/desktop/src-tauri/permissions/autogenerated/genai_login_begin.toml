@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-genai-login-begin"
+description = "Enables the genai_login_begin command without any pre-configured scope."
+commands.allow = ["genai_login_begin"]
+
+[[permission]]
+identifier = "deny-genai-login-begin"
+description = "Denies the genai_login_begin command without any pre-configured scope."
+commands.deny = ["genai_login_begin"]

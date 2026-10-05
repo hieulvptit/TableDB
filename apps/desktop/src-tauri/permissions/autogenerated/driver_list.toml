@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-driver-list"
+description = "Enables the driver_list command without any pre-configured scope."
+commands.allow = ["driver_list"]
+
+[[permission]]
+identifier = "deny-driver-list"
+description = "Denies the driver_list command without any pre-configured scope."
+commands.deny = ["driver_list"]

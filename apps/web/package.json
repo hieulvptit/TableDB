@@ -1,0 +1,46 @@
+{
+  "name": "@vnpay/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:desktop": "VITE_TARGET=desktop vite",
+    "build:web": "npm run build",
+    "build": "tsc --noEmit && vite build",
+    "build:desktop": "VITE_TARGET=desktop tsc --noEmit && VITE_TARGET=desktop vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@codemirror/autocomplete": "^6.18.0",
+    "@codemirror/commands": "^6.7.0",
+    "@codemirror/lang-sql": "^6.8.0",
+    "@codemirror/language": "^6.10.0",
+    "@codemirror/search": "^6.7.2",
+    "@codemirror/state": "^6.4.0",
+    "@codemirror/view": "^6.34.0",
+    "@lezer/highlight": "^1.2.0",
+    "@noble/hashes": "^1.5.0",
+    "@vnpay/shared": "*",
+    "@vnpay/ui": "*",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.27.0",
+    "sql-formatter": "^15.9.0"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.6.0",
+    "@testing-library/react": "^16.0.1",
+    "@testing-library/user-event": "^14.5.2",
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "jsdom": "^25.0.1",
+    "typescript": "^5.6.0",
+    "vite": "^5.4.0",
+    "vitest": "^2.1.0"
+  }
+}

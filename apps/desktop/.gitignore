@@ -1,0 +1,9 @@
+node_modules/
+src-tauri/target/
+src-tauri/gen/
+src-tauri/resources/jre/*
+src-tauri/resources/sidecar/*
+!src-tauri/resources/jre/.gitkeep
+!src-tauri/resources/sidecar/.gitkeep
+*.key
+*.pfx

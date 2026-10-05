@@ -1,0 +1,51 @@
+[package]
+name = "tabledb-desktop"
+version = "0.1.0"
+description = "VNPAY TableDB desktop shell (Tauri 2)"
+edition = "2021"
+rust-version = "1.77"
+publish = false
+
+[lib]
+name = "tabledb_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-proxy"] }
+tauri-plugin-log = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "system-proxy"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "io-util", "process", "time", "net", "macros"] }
+log = "0.4"
+rand = "0.8"
+sha2 = "0.10"
+aes-gcm = "0.10"
+base64 = "0.22"
+url = "2"
+thiserror = "1"
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-perl"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# direct keychain writes without a data read (see secrets::KeyringBackend::write); same version keyring pulls in
+security-framework = "3"
+
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-updater = "2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "s"
+panic = "abort"
+strip = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }

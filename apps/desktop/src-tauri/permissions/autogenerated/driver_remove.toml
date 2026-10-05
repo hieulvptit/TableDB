@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-driver-remove"
+description = "Enables the driver_remove command without any pre-configured scope."
+commands.allow = ["driver_remove"]
+
+[[permission]]
+identifier = "deny-driver-remove"
+description = "Denies the driver_remove command without any pre-configured scope."
+commands.deny = ["driver_remove"]

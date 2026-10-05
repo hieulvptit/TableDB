@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-transfer-save-chunk"
+description = "Enables the transfer_save_chunk command without any pre-configured scope."
+commands.allow = ["transfer_save_chunk"]
+
+[[permission]]
+identifier = "deny-transfer-save-chunk"
+description = "Denies the transfer_save_chunk command without any pre-configured scope."
+commands.deny = ["transfer_save_chunk"]

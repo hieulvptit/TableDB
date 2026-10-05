@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-clear"
+description = "Enables the workspace_clear command without any pre-configured scope."
+commands.allow = ["workspace_clear"]
+
+[[permission]]
+identifier = "deny-workspace-clear"
+description = "Denies the workspace_clear command without any pre-configured scope."
+commands.deny = ["workspace_clear"]

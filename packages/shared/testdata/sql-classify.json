@@ -1,0 +1,230 @@
+{
+  "_doc": "kind: read | write | ddl | other. multi=true means more than one statement (must be rejected by executors). Both TS (packages/shared) and Java (services/jdbc) must satisfy every case.",
+  "cases": [
+    {
+      "sql": "SELECT 1",
+      "kind": "read",
+      "multi": false
+    },
+    {
+      "sql": "  select * from t where a = 'x;y'",
+      "kind": "read",
+      "multi": false
+    },
+    {
+      "sql": "SELECT 1;",
+      "kind": "read",
+      "multi": false
+    },
+    {
+      "sql": "SELECT 1; SELECT 2",
+      "kind": "read",
+      "multi": true
+    },
+    {
+      "sql": "SELECT 1; DROP TABLE t",
+      "kind": "read",
+      "multi": true
+    },
+    {
+      "sql": "-- hi\nSELECT 1",
+      "kind": "read",
+      "multi": false
+    },
+    {
+      "sql": "/* c */ SELECT 1",
+      "kind": "read",
+      "multi": false
+    },
+    {
+      "sql": "/* DROP TABLE t */ SELECT 1",
+      "kind": "read",
+      "multi": false
+    },
+    {
+      "sql": "SELECT 'DROP TABLE t'",
+      "kind": "read",
+      "multi": false
+    },
+    {
+      "sql": "SELECT \"delete\" FROM t",
+      "kind": "read",
+      "multi": false
+    },
+    {
+      "sql": "WITH a AS (SELECT 1) SELECT * FROM a",
+      "kind": "read",
+      "multi": false
+    },
+    {
+      "sql": "WITH a AS (SELECT 1) DELETE FROM t",
+      "kind": "write",
+      "multi": false
+    },
+    {
+      "sql": "WITH a AS (SELECT 1) INSERT INTO t SELECT * FROM a",
+      "kind": "write",
+      "multi": false
+    },
+    {
+      "sql": "EXPLAIN SELECT 1",
+      "kind": "read",
+      "multi": false
+    },
+    {
+      "sql": "EXPLAIN ANALYZE DELETE FROM t",
+      "kind": "write",
+      "multi": false
+    },
+    {
+      "sql": "SHOW TABLES",
+      "kind": "read",
+      "multi": false
+    },
+    {
+      "sql": "DESCRIBE t",
+      "kind": "read",
+      "multi": false
+    },
+    {
+      "sql": "DESC t",
+      "kind": "read",
+      "multi": false
+    },
+    {
+      "sql": "VALUES (1)",
+      "kind": "read",
+      "multi": false
+    },
+    {
+      "sql": "INSERT INTO t VALUES (1)",
+      "kind": "write",
+      "multi": false
+    },
+    {
+      "sql": "update t set a=1",
+      "kind": "write",
+      "multi": false
+    },
+    {
+      "sql": "DELETE FROM t",
+      "kind": "write",
+      "multi": false
+    },
+    {
+      "sql": "MERGE INTO t USING s ON (1=1) WHEN MATCHED THEN UPDATE SET a=1",
+      "kind": "write",
+      "multi": false
+    },
+    {
+      "sql": "TRUNCATE TABLE t",
+      "kind": "ddl",
+      "multi": false
+    },
+    {
+      "sql": "CREATE TABLE t (a int)",
+      "kind": "ddl",
+      "multi": false
+    },
+    {
+      "sql": "DROP TABLE t",
+      "kind": "ddl",
+      "multi": false
+    },
+    {
+      "sql": "ALTER TABLE t ADD b int",
+      "kind": "ddl",
+      "multi": false
+    },
+    {
+      "sql": "GRANT SELECT ON t TO u",
+      "kind": "ddl",
+      "multi": false
+    },
+    {
+      "sql": "CALL proc()",
+      "kind": "other",
+      "multi": false
+    },
+    {
+      "sql": "EXEC proc",
+      "kind": "other",
+      "multi": false
+    },
+    {
+      "sql": "BEGIN NULL; END;",
+      "kind": "other",
+      "multi": false
+    },
+    {
+      "sql": "COPY t TO '/tmp/x'",
+      "kind": "other",
+      "multi": false
+    },
+    {
+      "sql": "SELECT * INTO newt FROM t",
+      "kind": "write",
+      "multi": false
+    },
+    {
+      "sql": "SELECT * FROM t FOR UPDATE",
+      "kind": "write",
+      "multi": false
+    },
+    {
+      "sql": "SET ROLE admin",
+      "kind": "other",
+      "multi": false
+    },
+    {
+      "sql": "",
+      "kind": "other",
+      "multi": false
+    },
+    {
+      "sql": "   ;  ",
+      "kind": "other",
+      "multi": false
+    },
+    {
+      "sql": "CREATE OR REPLACE PROCEDURE p IS BEGIN UPDATE t SET a = 1; COMMIT; END;",
+      "kind": "ddl",
+      "multi": false
+    },
+    {
+      "sql": "CREATE OR REPLACE EDITIONABLE FUNCTION f(x NUMBER) RETURN NUMBER AS v NUMBER; BEGIN v := x; RETURN v; END;",
+      "kind": "ddl",
+      "multi": false
+    },
+    {
+      "sql": "CREATE PACKAGE pk AS PROCEDURE a; FUNCTION b RETURN NUMBER; END pk;",
+      "kind": "ddl",
+      "multi": false
+    },
+    {
+      "sql": "CREATE OR REPLACE PACKAGE BODY pk AS PROCEDURE a IS BEGIN NULL; END; END pk;",
+      "kind": "ddl",
+      "multi": false
+    },
+    {
+      "sql": "CREATE OR REPLACE TRIGGER trg BEFORE INSERT ON t FOR EACH ROW BEGIN :NEW.a := 1; END;",
+      "kind": "ddl",
+      "multi": false
+    },
+    {
+      "sql": "CREATE FUNCTION f() RETURNS int AS $$ SELECT 1; $$ LANGUAGE sql; SELECT 1",
+      "kind": "ddl",
+      "multi": true
+    },
+    {
+      "sql": "CREATE TRIGGER trg BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION f(); DROP TABLE t",
+      "kind": "ddl",
+      "multi": true
+    },
+    {
+      "sql": "CREATE TABLE a (x int); CREATE TABLE b (y int)",
+      "kind": "ddl",
+      "multi": true
+    }
+  ]
+}

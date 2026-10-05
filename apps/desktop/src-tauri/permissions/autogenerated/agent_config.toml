@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-agent-config"
+description = "Enables the agent_config command without any pre-configured scope."
+commands.allow = ["agent_config"]
+
+[[permission]]
+identifier = "deny-agent-config"
+description = "Denies the agent_config command without any pre-configured scope."
+commands.deny = ["agent_config"]

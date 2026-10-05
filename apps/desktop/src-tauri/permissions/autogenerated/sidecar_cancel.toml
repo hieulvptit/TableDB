@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-sidecar-cancel"
+description = "Enables the sidecar_cancel command without any pre-configured scope."
+commands.allow = ["sidecar_cancel"]
+
+[[permission]]
+identifier = "deny-sidecar-cancel"
+description = "Denies the sidecar_cancel command without any pre-configured scope."
+commands.deny = ["sidecar_cancel"]

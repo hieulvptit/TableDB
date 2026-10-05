@@ -1,0 +1,11 @@
+{
+  "name": "@vnpay/shared",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "test": "vitest run", "typecheck": "tsc -p ." },
+  "dependencies": { "zod": "^3.23.8" },
+  "devDependencies": { "vitest": "^2.1.0", "typescript": "^5.6.0", "@types/node": "^22.0.0" }
+}

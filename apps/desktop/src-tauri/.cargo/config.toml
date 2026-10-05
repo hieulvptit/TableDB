@@ -1,0 +1,6 @@
+# macOS dev: ký binary bằng danh tính ổn định để Keychain không hỏi lại sau mỗi build (xem scripts/mac-dev-runner.sh)
+[target.aarch64-apple-darwin]
+runner = "../scripts/mac-dev-runner.sh"
+
+[target.x86_64-apple-darwin]
+runner = "../scripts/mac-dev-runner.sh"

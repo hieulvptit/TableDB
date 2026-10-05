@@ -1,0 +1,14 @@
+{
+  "name": "vnpay-tabledb",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/web",
+    "services/web"
+  ],
+  "scripts": {
+    "test": "npm run test -w @vnpay/shared && (cd services/api && go test ./...)",
+    "typecheck": "npm run typecheck -w @vnpay/shared"
+  }
+}

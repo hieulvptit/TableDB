@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-genai-login-forget"
+description = "Enables the genai_login_forget command without any pre-configured scope."
+commands.allow = ["genai_login_forget"]
+
+[[permission]]
+identifier = "deny-genai-login-forget"
+description = "Denies the genai_login_forget command without any pre-configured scope."
+commands.deny = ["genai_login_forget"]

@@ -1,0 +1,56 @@
+<#
+.SYNOPSIS  Full Windows desktop build: JRE (jlink) -> stage sidecar -> web dist -> tauri build (NSIS).
+.DESCRIPTION
+  Produces src-tauri\target\release\bundle\nsis\*.exe (+ .sig / latest.json inputs when updater signing is configured).
+  The CSP in tauri.conf.json is static, so the API origin is injected here via a generated --config override.
+.PARAMETER ApiOrigin        e.g. https://tabledb-api.vnpay.vn   (REQUIRED: becomes the only extra connect-src origin)
+.PARAMETER UpdaterPubkey    Public key from `tauri signer generate` (contents of the .pub file). Enables updater artifacts together with
+                            $env:TAURI_SIGNING_PRIVATE_KEY (+ TAURI_SIGNING_PRIVATE_KEY_PASSWORD).
+.PARAMETER UpdaterEndpoint  https URL template of the update manifest, e.g. https://updates.vnpay.vn/tabledb/{{target}}-{{arch}}/{{current_version}}
+.PARAMETER CertThumbprint   SHA-1 thumbprint of a code-signing cert already imported in the Windows cert store. Omit = unsigned installer.
+.PARAMETER TimestampUrl     RFC 3161 timestamp server used with signing.
+#>
+[CmdletBinding()]
+param(
+  [Parameter(Mandatory)][string]$ApiOrigin,
+  [string]$UpdaterPubkey,
+  [string]$UpdaterEndpoint,
+  [string]$CertThumbprint,
+  [string]$TimestampUrl = 'http://timestamp.digicert.com',
+  [switch]$SkipJre, [switch]$SkipSidecar, [switch]$SkipWeb
+)
+$ErrorActionPreference = 'Stop'
+$desk = Resolve-Path (Join-Path $PSScriptRoot '..')
+$web = Resolve-Path (Join-Path $desk '..\web')
+if ($ApiOrigin -notmatch '^https://[^/\s]+$') { throw 'ApiOrigin must be https://host[:port] with no path' }
+
+if (-not $SkipJre)     { & (Join-Path $PSScriptRoot 'build-jre.ps1') }
+if (-not $SkipSidecar) { & (Join-Path $PSScriptRoot 'stage-sidecar.ps1') }
+if (-not $SkipWeb) {
+  Push-Location $web
+  try { npm ci; if ($LASTEXITCODE) { throw 'npm ci failed' }; npm run build; if ($LASTEXITCODE) { throw 'web build failed' } } finally { Pop-Location }
+}
+if (-not (Test-Path (Join-Path $web 'dist\index.html'))) { throw 'apps/web/dist/index.html missing' }
+
+$csp = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost $ApiOrigin; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+$override = @{ app = @{ security = @{ csp = $csp } }; bundle = @{ windows = @{} } }
+if ($CertThumbprint) {
+  $override.bundle.windows = @{ certificateThumbprint = $CertThumbprint; digestAlgorithm = 'sha256'; timestampUrl = $TimestampUrl }
+}
+if ($UpdaterPubkey -and $env:TAURI_SIGNING_PRIVATE_KEY) {
+  if (-not $UpdaterEndpoint -or $UpdaterEndpoint -notmatch '^https://') { throw 'UpdaterEndpoint (https) required with UpdaterPubkey' }
+  $override.bundle.createUpdaterArtifacts = $true
+  $override.plugins = @{ updater = @{ pubkey = $UpdaterPubkey; endpoints = @($UpdaterEndpoint); windows = @{ installMode = 'passive' } } }
+} else {
+  Write-Warning 'Updater artifacts NOT produced (need -UpdaterPubkey and TAURI_SIGNING_PRIVATE_KEY). The placeholder pubkey in tauri.conf.json is inert.'
+}
+$cfgFile = Join-Path ([IO.Path]::GetTempPath()) "tabledb-tauri-$([guid]::NewGuid().ToString('N')).json"
+$override | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8 $cfgFile
+
+Push-Location $desk
+try {
+  if (-not (Test-Path 'node_modules\.bin\tauri.cmd')) { npm install; if ($LASTEXITCODE) { throw 'npm install failed' } }
+  npx tauri build --bundles nsis --config $cfgFile
+  if ($LASTEXITCODE) { throw 'tauri build failed' }
+} finally { Pop-Location; Remove-Item $cfgFile -ErrorAction SilentlyContinue }
+Get-ChildItem (Join-Path $desk 'src-tauri\target\release\bundle\nsis') | Format-Table Name, Length

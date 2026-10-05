@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-driver-import"
+description = "Enables the driver_import command without any pre-configured scope."
+commands.allow = ["driver_import"]
+
+[[permission]]
+identifier = "deny-driver-import"
+description = "Denies the driver_import command without any pre-configured scope."
+commands.deny = ["driver_import"]
