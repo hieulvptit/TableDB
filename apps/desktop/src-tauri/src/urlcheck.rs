@@ -50,6 +50,17 @@ pub fn validate_endpoint(raw: &str) -> Result<Url, AppError> {
     Ok(u)
 }
 
+/// API deployments may use HTTP on an RFC1918 private IPv4 network.
+/// OIDC and other authentication endpoints continue to use validate_endpoint.
+pub fn validate_api_endpoint(raw: &str) -> Result<Url, AppError> {
+    let u = validate_external_url(raw)?;
+    let private = matches!(u.host(), Some(Host::Ipv4(ip)) if ip.is_private());
+    if u.scheme() == "http" && !is_loopback_host(&u) && !private {
+        return Err(AppError::bad_request("API endpoint must use https (http allowed only for loopback or private IPs)"));
+    }
+    Ok(u)
+}
+
 /// `scheme://host[:port]` of a URL (what a CSP source expression looks like).
 pub fn origin_string(u: &Url) -> String {
     u.origin().ascii_serialization()
@@ -73,6 +84,17 @@ pub fn csp_allows_origin(csp: &str, origin: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn api_accepts_private_http_without_relaxing_auth_endpoints() {
+        for endpoint in ["http://10.23.5.40:8484", "http://172.16.0.1", "http://192.168.1.1"] {
+            assert!(validate_api_endpoint(endpoint).is_ok());
+            assert!(validate_endpoint(endpoint).is_err());
+        }
+        for endpoint in ["http://8.8.8.8", "http://172.32.0.1", "http://example.com", "http://user:pass@10.23.5.40"] {
+            assert!(validate_api_endpoint(endpoint).is_err());
+        }
+    }
 
     #[test]
     fn accepts_http_https() {

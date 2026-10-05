@@ -1,6 +1,7 @@
 """Prepare native desktop resources and collect CI installers (stdlib only)."""
 
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -19,12 +20,21 @@ def api_origin():
     origin = os.environ.get("API_ORIGIN", "").strip()
     parsed = urlsplit(origin)
     # Accept an origin only: no path, credentials, query, fragment or whitespace.
-    if (parsed.scheme != "https" or not parsed.hostname or parsed.username is not None
+    if (parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username is not None
             or parsed.password is not None or parsed.path or parsed.query or parsed.fragment
             or any(c.isspace() or c in ";'\"<>\\" for c in origin)
-            or origin != f"https://{parsed.netloc}"):
-        raise ValueError("Set TABLEDB_API_ORIGIN repository variable or api_origin workflow input to https://host[:port]")
+            or origin != f"{parsed.scheme}://{parsed.netloc}"):
+        raise ValueError("API origin must be http(s)://host[:port] without a path or credentials")
     parsed.port  # Also reject malformed ports.
+    if parsed.scheme == "http":
+        try:
+            address = ipaddress.ip_address(parsed.hostname)
+        except ValueError:
+            address = None
+        private_networks = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+        if not (parsed.hostname == "localhost" or (address is not None and (
+                address.is_loopback or any(address in ipaddress.ip_network(net) for net in private_networks)))):
+            raise ValueError("HTTP API origin must use localhost, a loopback IP or an RFC1918 private IP")
     return origin
 
 

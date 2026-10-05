@@ -89,8 +89,10 @@ jdk.unsupported, jdk.httpserver, jdk.crypto.ec, jdk.naming.dns` (modules missing
 | `tabledb-ubuntu-x64` | Ubuntu 22.04 container, x64 | `.deb`, `.AppImage` |
 | `tabledb-debian-x64` | Debian 12 container, x64 | `.deb` |
 
-Set **Settings → Secrets and variables → Actions → Variables → `TABLEDB_API_ORIGIN`**
-to the API origin (e.g. `https://tabledb-api.vnpay.vn`, no trailing slash or path).
+The default deployment API is `http://10.23.5.40:8484`. To override it, set
+**Settings → Secrets and variables → Actions → Variables → `TABLEDB_API_ORIGIN`**
+to the API origin (no trailing slash or path). HTTPS is accepted for any host;
+HTTP is accepted for localhost, loopback IPs and RFC1918 private IPv4 addresses.
 Then choose **Actions → Desktop builds → Run workflow**. The optional `api_origin`
 input overrides the repository variable for that run. Pushes to `main`, tags matching
 `desktop-v*`, and relevant pull requests also trigger builds.

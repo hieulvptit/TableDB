@@ -245,7 +245,7 @@ impl AppConfig {
         if self.api_base_url.is_empty() {
             return Err(AppError::bad_request("config apiBaseUrl is required"));
         }
-        validate_endpoint(&self.api_base_url)?;
+        crate::urlcheck::validate_api_endpoint(&self.api_base_url)?;
         self.api_base_url = self.api_base_url.trim_end_matches('/').to_string();
         if let Some(p) = &self.proxy.url {
             if p.is_empty() {
