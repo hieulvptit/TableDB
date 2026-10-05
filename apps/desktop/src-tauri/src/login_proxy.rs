@@ -2,7 +2,7 @@
 
 use crate::error::AppError;
 use base64::{engine::general_purpose::STANDARD, Engine};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     path::Path,
     process::{Child, Command},
@@ -16,6 +16,43 @@ use tokio::{
 use url::Url;
 
 pub const CREDENTIAL_KEY: &str = "proxy.sso.credentials";
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyCheck {
+    pub proxy_url: Option<String>,
+    pub reachable: bool,
+    pub latency_ms: Option<u64>,
+}
+
+/// TCP-only probe, equivalent to opening the proxy port with telnet. No credentials are read or sent.
+pub async fn check_connectivity(raw: Option<&str>) -> Result<ProxyCheck, AppError> {
+    let Some(raw) = raw else {
+        return Ok(ProxyCheck {
+            proxy_url: None,
+            reachable: true,
+            latency_ms: None,
+        });
+    };
+    let proxy = validate_proxy(raw)?;
+    let started = std::time::Instant::now();
+    let reachable = matches!(
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            TcpStream::connect((
+                proxy.host_str().unwrap(),
+                proxy.port_or_known_default().unwrap(),
+            ))
+        )
+        .await,
+        Ok(Ok(_))
+    );
+    Ok(ProxyCheck {
+        proxy_url: Some(raw.to_string()),
+        reachable,
+        latency_ms: reachable.then(|| started.elapsed().as_millis() as u64),
+    })
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -305,6 +342,23 @@ pub fn open_browser(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn tcp_probe_reports_open_closed_and_unconfigured_proxy() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let check = check_connectivity(Some(&url)).await.unwrap();
+        assert!(check.reachable);
+        assert!(check.latency_ms.is_some());
+        let (mut connection, _) = listener.accept().await.unwrap();
+        let mut byte = [0];
+        assert_eq!(connection.read(&mut byte).await.unwrap(), 0); // Probe sent no authentication or payload.
+        drop(listener);
+        let check = check_connectivity(Some(&url)).await.unwrap();
+        assert!(!check.reachable);
+        assert!(check.latency_ms.is_none());
+        assert!(check_connectivity(None).await.unwrap().proxy_url.is_none());
+    }
 
     #[test]
     fn blocks_non_sso_hosts_and_non_tls_ports() {

@@ -16,6 +16,7 @@
     "allow-agent-http-cancel",
     "allow-oidc-begin",
     "allow-genai-login-begin",
+    "allow-genai-proxy-check",
     "allow-genai-login-cancel",
     "allow-genai-login-forget",
     "allow-open-external",

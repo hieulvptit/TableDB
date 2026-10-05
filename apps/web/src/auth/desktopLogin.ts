@@ -56,6 +56,7 @@ export function genaiErrorMessage(e: unknown): string {
   }
   switch ((e as TauriErr | null)?.code) {
     case 'E_PROXY_AUTH_REQUIRED': return t('login.proxy.required');
+    case 'E_PROXY_UNREACHABLE': return t('login.proxy.unreachable');
     case 'E_GENAI_TIMEOUT': return t('login.genai.err.timeout');
     case 'E_GENAI_BUSY': case 'E_OIDC_BUSY': return t('login.genai.err.busy');
     case 'E_GENAI_NO_TOKEN': case 'E_GENAI_BAD_TOKEN': return t('login.genai.err.callback');

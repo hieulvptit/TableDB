@@ -13,6 +13,7 @@ fn main() {
             "agent_http_cancel",
             "oidc_begin",
             "genai_login_begin",
+            "genai_proxy_check",
             "genai_login_cancel",
             "genai_login_forget",
             "open_external",

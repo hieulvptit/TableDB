@@ -56,6 +56,7 @@ export interface AgentConfigInfo {
 
 export interface AppInfo { version?: string; env?: string; apiBaseUrl?: string; [k: string]: unknown }
 export const desktopCommands = {
+  genaiProxyCheck: () => tauriInvoke<{ proxyUrl: string | null; reachable: boolean; latencyMs: number | null }>('genai_proxy_check'),
   appInfo: () => tauriInvoke<AppInfo>('app_info'),
   openExternal: (url: string) => tauriInvoke<void>('open_external', { url }),
   secretSet: (key: string, value: string) => tauriInvoke<void>('secret_set', { key, value }),

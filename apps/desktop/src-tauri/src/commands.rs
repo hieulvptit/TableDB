@@ -185,6 +185,12 @@ impl Drop for BusyGuard<'_> {
     }
 }
 
+/// Probe only the configured SSO proxy, never an arbitrary address from the WebView.
+#[tauri::command]
+pub async fn genai_proxy_check(state: State<'_, AppState>) -> Result<crate::login_proxy::ProxyCheck, AppError> {
+    crate::login_proxy::check_connectivity(state.config.genai_proxy_url.as_deref()).await
+}
+
 /// VNPAY SSO broker login (loopback listener + secret callback path). Shares the busy flag with `oidc_begin`.
 #[tauri::command]
 pub async fn genai_login_begin(app: AppHandle, state: State<'_, AppState>, params: GenaiLoginParams) -> Result<GenaiLoginResult, AppError> {
@@ -198,6 +204,9 @@ pub async fn genai_login_begin(app: AppHandle, state: State<'_, AppState>, param
     // Keep proxy setup inside the result future so the cancellation sender is cleared on every error.
     let res = async {
         let proxy_bridge = if let Some(upstream) = state.config.genai_proxy_url.as_deref() {
+            if !crate::login_proxy::check_connectivity(Some(upstream)).await?.reachable {
+                return Err(AppError::new("E_PROXY_UNREACHABLE", "cannot connect to the SSO proxy"));
+            }
             let vault = state.vault.clone();
             let raw = tokio::task::spawn_blocking(move || vault.get(crate::login_proxy::CREDENTIAL_KEY)).await
                 .map_err(|_| AppError::new("E_SECRET_STORE", "cannot read proxy credentials"))??

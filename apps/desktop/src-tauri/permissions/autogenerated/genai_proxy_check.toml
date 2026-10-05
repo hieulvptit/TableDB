@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-genai-proxy-check"
+description = "Enables the genai_proxy_check command without any pre-configured scope."
+commands.allow = ["genai_proxy_check"]
+
+[[permission]]
+identifier = "deny-genai-proxy-check"
+description = "Denies the genai_proxy_check command without any pre-configured scope."
+commands.deny = ["genai_proxy_check"]

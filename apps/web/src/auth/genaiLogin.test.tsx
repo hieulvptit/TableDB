@@ -11,7 +11,12 @@ import { t } from '../i18n';
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 const JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1MSJ9.c2lnbmF0dXJl';
 const URL_ = 'https://genai.vnpay.vn/create-jwt-token';
-const setTauri = (invoke: (cmd: string, args?: unknown) => Promise<unknown>) => { (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = { invoke }; };
+const setTauri = (invoke: (cmd: string, args?: unknown) => Promise<unknown>) => {
+  (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {
+    invoke: (cmd: string, args?: unknown) => cmd === 'genai_proxy_check'
+      ? Promise.resolve({ proxyUrl: null, reachable: true, latencyMs: null }) : invoke(cmd, args),
+  };
+};
 afterEach(() => { delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__; localStorage.clear(); vi.restoreAllMocks(); });
 
 const bundle = { accessToken: 'AT', refreshToken: 'RT', expiresAt: Date.now() + 1000 };
@@ -91,6 +96,7 @@ describe('GenaiLoginPanel', () => {
     let reject!: (e: unknown) => void;
     setTauri((cmd) => cmd === 'genai_login_begin' ? new Promise((_, rj) => { reject = rj; }) : (reject({ code: 'E_GENAI_CANCELLED', message: 'c' }), Promise.resolve()));
     renderPanel();
+    await waitFor(() => expect(screen.getByRole('button', { name: t('login.genai.button') })).toBeEnabled());
     fireEvent.click(screen.getByRole('button', { name: t('login.genai.button') }));
     await screen.findByText(t('login.genai.waiting'));
     fireEvent.click(screen.getByRole('button', { name: t('login.genai.cancel') }));
@@ -101,6 +107,7 @@ describe('GenaiLoginPanel', () => {
   it('timeout shows a friendly toast without the token', async () => {
     setTauri(async () => { throw { code: 'E_GENAI_TIMEOUT', message: 'sign-in timed out' }; });
     renderPanel();
+    await waitFor(() => expect(screen.getByRole('button', { name: t('login.genai.button') })).toBeEnabled());
     fireEvent.click(screen.getByRole('button', { name: t('login.genai.button') }));
     await waitFor(() => expect(toastPush).toHaveBeenCalledWith(t('login.genai.err.timeout'), 'error'));
   });
@@ -109,6 +116,7 @@ describe('GenaiLoginPanel', () => {
     setTauri(async () => ({ token: JWT }));
     const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(json(bundle));
     const { onDone } = renderPanel();
+    await waitFor(() => expect(screen.getByRole('button', { name: t('login.genai.button') })).toBeEnabled());
     fireEvent.click(screen.getByRole('button', { name: t('login.genai.button') }));
     await waitFor(() => expect(onDone).toHaveBeenCalled());
     spy.mockResolvedValueOnce(json({ error: { code: 'FORBIDDEN', message: 'no' } }, 403));

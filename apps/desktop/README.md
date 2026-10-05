@@ -67,6 +67,13 @@ and save them once. They are stored as `proxy.sso.credentials` in Windows Creden
 Manager, macOS Keychain, or Linux Secret Service (an unlocked desktop keyring is
 required on Linux). They are never included in config.json, source, CI logs or installers.
 
+The login screen automatically checks the proxy TCP port with a three-second timeout.
+The **Proxy** button is green when reachable and gray while checking or unreachable;
+click it to check again. The tooltip includes the result and latency. SSO is disabled
+until the TCP check succeeds, and the native core repeats the check before opening a
+browser or reading proxy credentials. A successful TCP check does not verify the
+proxy username/password or the remote SSO site.
+
 The app runs a loopback CONNECT bridge only for the active login session. It sends
 Basic proxy authentication to the upstream proxy, forwards TLS without decrypting
 it, and restricts tunnels to the configured broker hosts, `sso.vnpay.vn`,

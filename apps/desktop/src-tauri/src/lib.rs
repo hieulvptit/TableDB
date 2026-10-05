@@ -163,6 +163,7 @@ pub fn run() {
             commands::agent_http_cancel,
             commands::oidc_begin,
             commands::genai_login_begin,
+            commands::genai_proxy_check,
             commands::genai_login_cancel,
             commands::genai_login_forget,
             commands::open_external,
