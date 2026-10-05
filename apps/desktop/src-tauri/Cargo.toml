@@ -37,6 +37,10 @@ regex = { version = "1", default-features = false, features = ["std", "perf", "u
 # direct keychain writes without a data read (see secrets::KeyringBackend::write); same version keyring pulls in
 security-framework = "3"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Persist proxy/session secrets in the desktop Secret Service rather than keyring's mock backend.
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust", "vendored"] }
+
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-updater = "2"
 

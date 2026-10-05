@@ -98,9 +98,9 @@ pub fn webview_secret_key(key: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Agent tokens are write-only from the WebView: only the Rust HTTP bridge ever reads them back.
+/// Agent tokens and SSO proxy credentials are write-only from the WebView.
 pub fn webview_secret_readable(key: &str) -> Result<(), AppError> {
-    if key.starts_with("agent:token:") {
+    if key.starts_with("agent:token:") || key == crate::login_proxy::CREDENTIAL_KEY {
         return Err(AppError::new("E_SECRET_KEY", "write-only secret key"));
     }
     Ok(())
@@ -109,6 +109,9 @@ pub fn webview_secret_readable(key: &str) -> Result<(), AppError> {
 #[tauri::command]
 pub async fn secret_set(state: State<'_, AppState>, key: String, value: String) -> Result<(), AppError> {
     webview_secret_key(&key)?;
+    if key == crate::login_proxy::CREDENTIAL_KEY {
+        crate::login_proxy::Credentials::parse(&value)?;
+    }
     vault_op(&state, move |v| v.set(&key, &value)).await
 }
 
@@ -192,14 +195,40 @@ pub async fn genai_login_begin(app: AppHandle, state: State<'_, AppState>, param
     let (tx, rx) = tokio::sync::oneshot::channel();
     *state.genai_cancel.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
     log::info!("genai_login_begin (host {})", url::Url::parse(&params.login_url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default());
-    let res = match state.config.genai_login_browser {
-        GenaiBrowser::Internal => {
-            genai_internal::run(app.clone(), params, &state.config.genai_login_origins, state.config.proxy.url.as_deref(), state.config.genai_persist_sso, rx).await
-        }
-        GenaiBrowser::System => {
-            genai::run_flow(params, &state.config.genai_login_origins, state.config.genai_secret_path, rx, |u| open_in_browser(&app, u)).await
-        }
-    };
+    // Keep proxy setup inside the result future so the cancellation sender is cleared on every error.
+    let res = async {
+        let proxy_bridge = if let Some(upstream) = state.config.genai_proxy_url.as_deref() {
+            let vault = state.vault.clone();
+            let raw = tokio::task::spawn_blocking(move || vault.get(crate::login_proxy::CREDENTIAL_KEY)).await
+                .map_err(|_| AppError::new("E_SECRET_STORE", "cannot read proxy credentials"))??
+                .ok_or_else(|| AppError::new("E_PROXY_AUTH_REQUIRED", "save SSO proxy username and password first"))?;
+            let credentials = crate::login_proxy::Credentials::parse(&raw)?;
+            Some(crate::login_proxy::LoginProxy::start(
+                crate::login_proxy::validate_proxy(upstream)?, Some(credentials), &state.config.genai_login_origins,
+            ).await?)
+        } else { None };
+        let browser_proxy = proxy_bridge.as_ref().map(|p| p.url.as_str()).or(state.config.proxy.url.as_deref());
+        let mut browser = None;
+        let res = match state.config.genai_login_browser {
+            GenaiBrowser::Internal => {
+                genai_internal::run(app.clone(), params, &state.config.genai_login_origins, browser_proxy, state.config.genai_persist_sso, rx).await
+            }
+            GenaiBrowser::System => {
+                genai::run_flow(params, &state.config.genai_login_origins, state.config.genai_secret_path, rx, |u| {
+                    if let Some(proxy) = proxy_bridge.as_ref() {
+                        let profile = app.path().app_local_data_dir()
+                            .map_err(|_| AppError::new("E_OPEN_URL", "cannot locate SSO profile"))?.join("genai-browser-profile");
+                        browser = Some(crate::login_proxy::open_browser(u, &proxy.url, &profile, state.config.genai_persist_sso)?);
+                        Ok(())
+                    } else {
+                        open_in_browser(&app, u)
+                    }
+                }).await
+            }
+        };
+        drop(browser);
+        res
+    }.await;
     *state.genai_cancel.lock().unwrap_or_else(|e| e.into_inner()) = None;
     res
 }
@@ -234,6 +263,7 @@ pub struct AppInfo {
     env: String,
     api_base_url: String,
     proxy_url: Option<String>,
+    genai_proxy_url: Option<String>,
     config_path: String,
     config_error: Option<String>,
     csp_allows_api: bool,
@@ -253,6 +283,7 @@ pub fn app_info(app: AppHandle, state: State<'_, AppState>) -> AppInfo {
         env: state.config.env.clone(),
         api_base_url: state.config.api_base_url.clone(),
         proxy_url: state.config.proxy.url.clone(),
+        genai_proxy_url: state.config.genai_proxy_url.clone(),
         config_path: state.config_path.clone(),
         config_error: state.config_error.clone(),
         csp_allows_api,
@@ -360,6 +391,8 @@ mod tests {
         assert!(super::webview_secret_key("db.profile.x.password").is_ok());
         assert_eq!(super::webview_secret_key(crate::workspace_store::KEY_NAME).unwrap_err().code, "E_SECRET_KEY");
         assert!(super::webview_secret_key("internal:anything").is_err());
+        assert!(super::webview_secret_key(crate::login_proxy::CREDENTIAL_KEY).is_ok());
+        assert!(super::webview_secret_readable(crate::login_proxy::CREDENTIAL_KEY).is_err());
     }
 }
 

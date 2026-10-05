@@ -177,6 +177,9 @@ pub struct AppConfig {
     /// `internal` (default) or `system`. Env: TABLEDB_GENAI_BROWSER.
     #[serde(default)]
     pub genai_login_browser: GenaiBrowser,
+    /// SSO-only HTTP proxy. Credentials are kept in the OS vault, never in config.json.
+    #[serde(default)]
+    pub genai_proxy_url: Option<String>,
     /// Local Agent (LLM endpoints, OpenMetadata MCP). The Agent runs in this app, not on the API server.
     #[serde(default)]
     pub agent: AgentConfig,
@@ -192,7 +195,7 @@ fn default_env() -> String {
 }
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { env: default_env(), api_base_url: String::new(), proxy: ProxyConfig::default(), sidecar: SidecarConfig::default(), genai_login_origins: default_genai_origins(), genai_secret_path: false, genai_persist_sso: true, genai_login_browser: GenaiBrowser::Internal, agent: AgentConfig::default() }
+        Self { env: default_env(), api_base_url: String::new(), proxy: ProxyConfig::default(), sidecar: SidecarConfig::default(), genai_login_origins: default_genai_origins(), genai_secret_path: false, genai_persist_sso: true, genai_login_browser: GenaiBrowser::Internal, genai_proxy_url: None, agent: AgentConfig::default() }
     }
 }
 
@@ -236,6 +239,9 @@ impl AppConfig {
         if let Some(v) = env.get("TABLEDB_PROXY_URL") {
             self.proxy.url = Some(v.trim().to_string());
         }
+        if let Some(v) = env.get("TABLEDB_GENAI_PROXY_URL") {
+            self.genai_proxy_url = Some(v.trim().to_string());
+        }
     }
 
     pub fn validate(&mut self) -> Result<(), AppError> {
@@ -246,6 +252,9 @@ impl AppConfig {
             return Err(AppError::bad_request("config apiBaseUrl is required"));
         }
         crate::urlcheck::validate_api_endpoint(&self.api_base_url)?;
+        if let Some(p) = &self.genai_proxy_url {
+            crate::login_proxy::validate_proxy(p)?;
+        }
         self.api_base_url = self.api_base_url.trim_end_matches('/').to_string();
         if let Some(p) = &self.proxy.url {
             if p.is_empty() {

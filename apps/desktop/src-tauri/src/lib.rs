@@ -7,6 +7,7 @@ pub mod ssh_keys;
 pub mod error;
 pub mod genai;
 pub mod genai_internal;
+pub mod login_proxy;
 pub mod oidc;
 pub mod redact;
 pub mod secrets;
@@ -82,6 +83,11 @@ pub fn run() {
             let sample = dir.join("config.sample.json");
             if !sample.exists() {
                 let _ = std::fs::write(&sample, config::SAMPLE);
+            }
+            // First launch uses the deployment settings embedded by CI. Existing configs are preserved.
+            if let Ok(mut file) = std::fs::OpenOptions::new().write(true).create_new(true).open(&cfg_path) {
+                use std::io::Write;
+                file.write_all(config::SAMPLE.as_bytes())?;
             }
             let file = std::fs::read_to_string(&cfg_path).ok();
             let (cfg, cfg_err) = match AppConfig::resolve(file.as_deref(), &OsEnv) {

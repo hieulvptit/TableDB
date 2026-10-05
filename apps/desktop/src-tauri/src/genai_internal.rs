@@ -79,6 +79,10 @@ pub async fn forget(app: &AppHandle) -> Result<(), AppError> {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
     }
+    if let Ok(dir) = app.path().app_local_data_dir() {
+        remove_profile_dir(&dir.join("genai-browser-profile"))
+            .map_err(|_| AppError::new("E_GENAI_FORGET", "cannot clear browser SSO profile"))?;
+    }
     Ok(())
 }
 

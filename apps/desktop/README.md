@@ -54,6 +54,33 @@ Overrides: `TABLEDB_ENV`, `TABLEDB_API_BASE_URL`, `TABLEDB_PROXY_URL`. `env` (`t
 Logs: `%LOCALAPPDATA%\vn.vnpay.tabledb\logs\tabledb.log` (5 MB rotation, keep 5), every line passes through `redact.rs`
 (bearer/JWT, `password|token|secret|code_verifier…=` pairs, `code`/`state` URL params, URL userinfo).
 
+## SSO proxy
+
+Deployment builds use the SSO-only proxy `http://10.23.5.189:3359` via
+`genaiProxyUrl` in `config.json` (override: `TABLEDB_GENAI_PROXY_URL`). This setting
+does not route the TableDB API or JDBC connections through that proxy. Existing
+installations must add the setting to their existing config; new installations
+create `config.json` from the embedded deployment sample on first launch.
+
+On the login screen, expand **SSO login proxy**, enter the proxy username/password,
+and save them once. They are stored as `proxy.sso.credentials` in Windows Credential
+Manager, macOS Keychain, or Linux Secret Service (an unlocked desktop keyring is
+required on Linux). They are never included in config.json, source, CI logs or installers.
+
+The app runs a loopback CONNECT bridge only for the active login session. It sends
+Basic proxy authentication to the upstream proxy, forwards TLS without decrypting
+it, and restricts tunnels to the configured broker hosts, `sso.vnpay.vn`,
+`genai.vnpay.vn`, and Google login/resource domains (`google.com`, `gstatic.com`,
+`googleusercontent.com` and their subdomains). The bridge and its tunnels stop on
+success, cancellation, timeout or error.
+
+The deployment sample uses `genaiLoginBrowser: "system"`: a separate Chrome/Edge
+process with an app-specific profile and proxy, so Google login uses a real browser.
+Install Chrome/Edge (or Chromium on Linux). The app closes that login browser when
+the flow ends; **Forget SSO** also clears its separate profile. Normal browser
+profiles and OS proxy settings are unchanged. `"internal"` also supports the bridge,
+but Google may refuse embedded browsers. See [Google's native-app OAuth guidance](https://developers.google.com/identity/protocols/oauth2/native-app).
+
 ## Building on Windows
 
 Prerequisites: Windows 10/11 x64, Visual Studio Build Tools (C++), Rust stable (MSVC), Node 24, JDK 21 (with jmods; `JAVA_HOME` set), Maven, WebView2 (installer bootstraps it),

@@ -1,6 +1,8 @@
 {
   "env": "test",
   "apiBaseUrl": "https://tabledb-api.test.example.vn",
+  "genaiProxyUrl": "http://10.23.5.189:3359",
+  "genaiLoginBrowser": "system",
   "proxy": {
     "url": null
   },
