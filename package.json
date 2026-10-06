@@ -8,7 +8,9 @@
     "services/web"
   ],
   "scripts": {
-    "test": "npm run test -w @vnpay/shared && (cd services/api && go test ./...)",
-    "typecheck": "npm run typecheck -w @vnpay/shared"
+    "test": "npm run test:frontend && npm run test:api",
+    "test:frontend": "npm run test --workspaces --if-present",
+    "test:api": "cd services/api && go test ./...",
+    "typecheck": "npm run typecheck --workspaces --if-present"
   }
 }

@@ -18,6 +18,7 @@ import (
 	"vnpay/tabledb-api/internal/crypto"
 	"vnpay/tabledb-api/internal/inspect"
 	"vnpay/tabledb-api/internal/reqmeta"
+	"vnpay/tabledb-api/internal/securetransport"
 	"vnpay/tabledb-api/internal/shared"
 )
 
@@ -250,6 +251,10 @@ func (rt *Router) Handle(method, path string, o Opts, h HandlerFunc) {
 			return
 		}
 		if a != nil {
+			if securetransport.IsEncrypted(r.Context()) && securetransport.ClientKind(r.Context()) != string(a.Kind) {
+				WriteError(w, rt.D.Log, apperr.Forbiddenf("secure channel client kind does not match session"))
+				return
+			}
 			r = r.WithContext(context.WithValue(r.Context(), authKey, a))
 		}
 		r = r.WithContext(reqmeta.With(r.Context(), rt.D.requestMeta(w, r, a)))

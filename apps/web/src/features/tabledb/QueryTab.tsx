@@ -1,3 +1,4 @@
+import { dbRuntimeConfig } from './runtimeConfig';
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { Button, EmptyState, Spinner, SplitPane, Tabs, useToast } from '@vnpay/ui';
 import { t } from '../../i18n';
@@ -150,12 +151,12 @@ export function QueryTab({ tab }: { tab: EditorTabState }) {
         <span style={{ flex: 1 }} />
         {conn && <SessionControls conn={conn} tab={tab} />}
         <label>{t('editor.maxRows')}
-          <input className="ui-input" type="number" min={1} max={100000} value={tab.maxRows}
-            onChange={(e) => db.updateTab(tab.id, { maxRows: Math.max(1, Math.min(100000, Number(e.target.value) || 1)) })} />
+          <input className="ui-input" type="number" min={1} max={dbRuntimeConfig().maxRows} value={tab.maxRows}
+            onChange={(e) => db.updateTab(tab.id, { maxRows: Math.max(1, Math.min(dbRuntimeConfig().maxRows, Number(e.target.value) || 1)) })} />
         </label>
         <label>{t('editor.timeout')}
-          <input className="ui-input" type="number" min={1} max={600} value={tab.timeoutSec} style={{ width: 56 }}
-            onChange={(e) => db.updateTab(tab.id, { timeoutSec: Math.max(1, Math.min(600, Number(e.target.value) || 1)) })} />
+          <input className="ui-input" type="number" min={1} max={dbRuntimeConfig().maxTimeoutSec} value={tab.timeoutSec} style={{ width: 56 }}
+            onChange={(e) => db.updateTab(tab.id, { timeoutSec: Math.max(1, Math.min(dbRuntimeConfig().maxTimeoutSec, Number(e.target.value) || 1)) })} />
         </label>
       </div>
       <input ref={fileRef} type="file" accept=".sql,.txt,text/plain" hidden onChange={(e) => { void open(e.target.files?.[0]); e.target.value = ''; }} />

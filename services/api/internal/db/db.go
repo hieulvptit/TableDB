@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -61,9 +62,13 @@ func (p *Pool) InTx(ctx context.Context, fn func(Runner) error) error {
 	if err != nil {
 		return err
 	}
+	// Always release the transaction, including when the callback panics.
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_ = tx.Rollback(cleanup)
+	}()
 	if err := fn(&txRunner{tx}); err != nil {
-		// detach from the request context so a cancelled request still rolls back
-		_ = tx.Rollback(context.WithoutCancel(ctx))
 		return err
 	}
 	return tx.Commit(ctx)

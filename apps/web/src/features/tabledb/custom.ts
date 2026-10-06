@@ -1,3 +1,4 @@
+import { dbRuntimeConfig } from './runtimeConfig';
 import type { DriverType } from '@vnpay/shared';
 import type { AuthSpec, ProfileSpec, SessionRequest } from '../../gateway/types';
 import type { NetworkForm } from './network';
@@ -47,7 +48,7 @@ export interface CustomForm {
 
 export const emptyCustomForm = (): CustomForm => ({
   driver: 'oracle', host: '', port: String(DEFAULT_PORTS.oracle), connectType: 'serviceName', database: '', ssl: false,
-  connectTimeoutSec: '15', props: [], allowWrite: false, username: '', password: '', schema: '', sso: false,
+  connectTimeoutSec: String(dbRuntimeConfig().connectTimeoutSec), props: [], allowWrite: false, username: '', password: '', schema: '', sso: false,
 });
 
 /** SSO is effective only for Trino. */
@@ -180,7 +181,7 @@ export function buildCustomRequest(f: CustomForm, canWrite: boolean): SessionReq
       ...(f.driver === 'oracle' ? { connectType: f.connectType } : {}),
       ssl: f.ssl, readOnly: true, allowWrite: canWrite && f.allowWrite,
       connectTimeoutSec: Number(f.connectTimeoutSec),
-      ...(usesSso(f) ? { externalAuthTimeoutSec: 180 } : {}),
+      ...(usesSso(f) ? { externalAuthTimeoutSec: dbRuntimeConfig().externalAuthTimeoutSec } : {}),
       ...(Object.keys(props).length > 0 ? { props } : {}),
     },
   };

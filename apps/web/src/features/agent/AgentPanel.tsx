@@ -1,23 +1,26 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { ContextManifest } from '@vnpay/shared';
 import { Badge, Button, EmptyState, Spinner, useToast } from '@vnpay/ui';
 import type { AgentAsk, AgentProposal, AgentSettings, AgentSqlBlock, AgentTokenState, AgentTraceEvent } from '../../api/types';
 import { useAuth } from '../../auth/AuthContext';
 import { errorMessage, t } from '../../i18n';
 import { useStoreVersion } from '../tabledb/SchemaTree';
-import { useTableDb } from '../tabledb/store';
+import { useTableDbSelector, type TableDbApi } from '../tabledb/store';
 import { Icon } from '../tabledb/icons';
 import { agentApi } from './api';
 import { ContextDisclosure } from './ContextDisclosure';
 import { buildChatBody, buildPreviewBody, ensureContext, type AgentLlmChoice } from './context';
+import { withDeadline } from './harness/harness';
+import { DEFAULT_RUNTIME } from './runtimeConfig';
 import { parseReply } from './parseReply';
 import { ChartBlock } from './ChartBlock';
 import { HtmlBlock } from './HtmlBlock';
 import { SqlBlock } from './SqlBlock';
+import { PersonalAgentsManager } from './PersonalAgentsManager';
 import { MemoryManager } from './MemoryManager';
 import { SessionList } from './SessionList';
-import { buildHistory, KEEP_RECENT, pendingSummary, summaryRequest, titleFrom } from './memory';
-import { contextPayload, getChats, getMemories, newChatId, newContextId, newMemoryId, saveChat, saveContextNote, saveMemory, type ChatMsg, type ChatSession } from '../tabledb/workspace';
+import { buildHistory, pendingSummary, summaryRequest, titleFrom } from './memory';
+import { MAX_CHAT_MSGS, getPersonalSkills, getPersonalAgents, usePersonalAgents, contextPayload, getChats, getMemories, newChatId, newContextId, newMemoryId, saveChat, saveContextNote, saveMemory, type ChatMsg, type ChatSession } from '../tabledb/workspace';
 import { ContextNotes } from './ContextNotes';
 import { LiveStatus, TraceSummary } from './TraceView';
 import { TokenSetup } from './TokenSetup';
@@ -25,7 +28,7 @@ import { OpenMetadataSetup } from './OpenMetadataSetup';
 import { fileToDataUrl, imageFiles, MAX_IMAGES } from './images';
 
 interface Msg { id: number; role: 'user' | 'assistant'; content: string; sql?: AgentSqlBlock[]; manifest?: ContextManifest; error?: boolean; rowsAttached?: number; model?: string; at?: number; trace?: AgentTraceEvent[]; ask?: AgentAsk; proposals?: AgentProposal[]; images?: string[] }
-type PanelView = 'chat' | 'sessions' | 'memory';
+type PanelView = 'chat' | 'sessions' | 'memory' | 'personal';
 const toStored = (m: Msg[]): ChatMsg[] => m.map((x) => ({ role: x.role, content: x.content, at: x.at ?? Date.now(), ...(x.model ? { model: x.model } : {}), ...(x.error ? { error: true } : {}) }));
 
 const LLM_KEY = 'tabledb.agent.llm';
@@ -52,8 +55,9 @@ const SUGGESTIONS: { icon: Parameters<typeof Icon>[0]['name']; tone: string; id:
 ];
 const SQL_TEMPLATE = '```sql\nSELECT * FROM \n```';
 
-export function AgentPanel({ open = true, onClose }: { open?: boolean; onClose?: () => void }) {
-  const db = useTableDb();
+const agentState = (db: TableDbApi) => ({ connections: db.connections, activeConn: db.activeConn, selected: db.selected, agentRows: db.agentRows, setAgentRows: db.setAgentRows, setSelected: db.setSelected, insertSql: db.insertSql });
+export const AgentPanel = memo(function AgentPanel({ open = true, onClose }: { open?: boolean; onClose?: () => void }) {
+  const db = useTableDbSelector(agentState);
   const { can } = useAuth();
   const toast = useToast();
   const conn = db.activeConn;
@@ -66,8 +70,10 @@ export function AgentPanel({ open = true, onClose }: { open?: boolean; onClose?:
   const [images, setImages] = useState<string[]>([]);   // attached to the next message; never persisted
   const fileRef = useRef<HTMLInputElement>(null);
   const [sending, setSending] = useState(false);
+  const [liveReply, setLiveReply] = useState('');
   const [live, setLive] = useState<AgentTraceEvent[]>([]);
   const [savedNotes, setSavedNotes] = useState<Set<string>>(new Set());
+  const summaryRuns = useRef(new Map<string, AbortController>());
   const abortRef = useRef<AbortController | null>(null);
   const expandRelated = true; // related (FK) tables are always included
   const [preview, setPreview] = useState<ContextManifest | null>(null);
@@ -76,9 +82,12 @@ export function AgentPanel({ open = true, onClose }: { open?: boolean; onClose?:
   const [showSetup, setShowSetup] = useState(false);
   const [llm, setLlm] = useState<AgentLlmChoice | null>(null);
   const [view, setView] = useState<PanelView>('chat');
+  const personalAgents = usePersonalAgents();
+  const [agentName, setAgentName] = useState('');
   const [sessionId, setSessionId] = useState<string | null>(null);
   const seq = useRef(0);
   const listRef = useRef<HTMLDivElement>(null);
+  const followReply = useRef(true);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   const load = useCallback(async () => {
@@ -110,11 +119,13 @@ export function AgentPanel({ open = true, onClose }: { open?: boolean; onClose?:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, conn, settings, selKey, expandRelated, rowsKey]);
 
-  useEffect(() => { listRef.current?.scrollTo?.({ top: listRef.current.scrollHeight }); }, [msgs.length]);
-  const newChat = useCallback(() => { abortRef.current?.abort(); setMsgs([]); setSessionId(null); setView('chat'); setLive([]); }, []);
+  useEffect(() => { if (followReply.current) listRef.current?.scrollTo?.({ top: listRef.current.scrollHeight }); }, [msgs.length, liveReply]);
+  const cancelRun = useCallback(() => { const current = abortRef.current; abortRef.current = null; current?.abort(); setSending(false); setLive([]); setLiveReply(''); }, []);
+  const newChat = useCallback(() => { cancelRun(); setMsgs([]); setSessionId(null); setView('chat'); }, [cancelRun]);
+  useEffect(() => () => { abortRef.current?.abort(); abortRef.current = null; summaryRuns.current.forEach((c) => c.abort()); }, []);
   // a conversation belongs to one connection: switching connection starts a fresh one (the old one stays in the list)
   useEffect(() => { newChat(); }, [conn?.id, newChat]);
-  const openSession = (c: ChatSession) => { setMsgs(c.messages.map((m) => ({ id: ++seq.current, ...m }))); setSessionId(c.id); setView('chat'); };
+  const openSession = (c: ChatSession) => { cancelRun(); setAgentName(c.agentName ?? ''); setMsgs(c.messages.map((m) => ({ id: ++seq.current, ...m }))); setSessionId(c.id); setView('chat'); };
   const remember = (text: string) => {
     const ok = saveMemory({ id: newMemoryId(), text: text.replace(/\s+/g, ' ').trim().slice(0, 300), at: Date.now(), enabled: true });
     toast.push(t(ok ? 'memory.saved' : 'memory.full'), ok ? 'success' : 'error');
@@ -150,47 +161,79 @@ export function AgentPanel({ open = true, onClose }: { open?: boolean; onClose?:
   const send = async (override?: string) => {
     const shots = override === undefined ? images : [];
     const text = (override ?? draft).trim() || (shots.length ? t('agent.imageOnlyPrompt') : '');
-    if (!text || !conn || sending) return;
+    if (!text || !conn || sending || abortRef.current) return;
     const rows = db.agentRows;
+    const skillsForRun = getPersonalSkills().filter((s) => s.enabled);
+    const agentsForRun = getPersonalAgents().filter((a) => a.enabled);
+    if (agentName && !agentsForRun.some((a) => a.name === agentName)) { toast.push(t('personal.unavailable'), 'error'); return; }
     const userMsg: Msg = { id: ++seq.current, role: 'user', content: text, rowsAttached: rows?.rows.length, at: Date.now(), ...(shots.length ? { images: shots } : {}) };
-    const base = [...msgs, userMsg];
+    followReply.current = true;
+    const base = [...msgs, userMsg].slice(-MAX_CHAT_MSGS);
     const sid = sessionId ?? newChatId();
     if (!sessionId) setSessionId(sid);
-    setMsgs(base); setDraft(''); setImages([]); setSending(true); setLive([]);
+    setMsgs(base); setDraft(''); setImages([]); setSending(true); setLive([]); setLiveReply('');
     const ctrl = new AbortController(); abortRef.current = ctrl;
     const prev = getChats().find((c) => c.id === sid);
+    const persist = (messages: Msg[]) => {
+      const now = Date.now();
+      const current = getChats().find((c) => c.id === sid);
+      const first = messages[0];
+      const skipped = current && first ? current.messages.findIndex((m) => m.at === first.at && m.role === first.role && m.content === first.content) : 0;
+      const summarized = Math.max(0, (current?.summarized ?? 0) - Math.max(0, skipped));
+      saveChat({
+        ...(agentName ? { agentName } : {}),
+        id: sid, title: current?.title ?? prev?.title ?? titleFrom(text), ...(current?.pinned ? { pinned: true } : {}), connName: conn.name, ...(conn.profileId ? { profileId: conn.profileId } : {}),
+        createdAt: prev?.createdAt ?? now, updatedAt: now, ...(current?.summary ? { summary: current.summary } : {}), summarized, messages: toStored(messages),
+      });
+    };
+    persist(base);
     let final = base;
     try {
-      await ensureContext(conn, db.selected, expandRelated);
-      const history = buildHistory(toStored(base), getMemories(), prev?.summary, prev?.summarized ?? 0);
-      const r = await agentApi.chatStream(buildChatBody(conn, db.selected, expandRelated, shots.length ? [...history.slice(0, -1), { ...history[history.length - 1]!, images: shots }] : history, rows, llm, { dataContext: contextPayload(conn.profileId) }), (e) => setLive((l) => [...l, e].slice(-60)), ctrl.signal);
+      const r = await withDeadline(settings?.runtime.harness.deadlineMs ?? DEFAULT_RUNTIME.harness.deadlineMs, ctrl.signal, async (signal) => {
+        await ensureContext(conn, db.selected, expandRelated);
+        if (signal.aborted || ctrl.signal.aborted || abortRef.current !== ctrl) throw new Error('cancelled');
+        const saved = getChats().find((c) => c.id === sid);
+        const history = buildHistory(toStored(base), getMemories(), saved?.summary, saved?.summarized ?? 0, settings?.runtime.memory);
+        return agentApi.chatStream(buildChatBody(conn, db.selected, expandRelated, shots.length ? [...history.slice(0, -1), { ...history[history.length - 1]!, images: shots }] : history, rows, llm, { dataContext: contextPayload(conn.profileId), personalSkills: skillsForRun, personalAgents: agentsForRun, ...(agentName ? { agentName } : {}) }), (e) => {
+          if (abortRef.current === ctrl && !ctrl.signal.aborted) {
+            setLive((l) => [...l, e].slice(-60));
+            if (e.depth === 0 && (e.kind === 'thinking' || e.kind === 'tool' || e.kind === 'subagent')) setLiveReply('');
+          }
+        }, signal, (reply) => {
+          if (abortRef.current === ctrl && !ctrl.signal.aborted) setLiveReply(reply);
+        });
+      });
+      if (ctrl.signal.aborted || abortRef.current !== ctrl) return;
       db.setAgentRows(null); // rows are single-use: never re-sent silently
-      final = [...base, { id: ++seq.current, role: 'assistant', content: r.reply, sql: r.sql, manifest: r.manifest, model: llm?.model, at: Date.now(), trace: r.trace, ...(r.ask ? { ask: r.ask } : {}), ...(r.proposals?.length ? { proposals: r.proposals } : {}) }];
+      final = [...base, { id: ++seq.current, role: 'assistant' as const, content: r.reply, sql: r.sql, manifest: r.manifest, model: llm?.model, at: Date.now(), trace: r.trace, ...(r.ask ? { ask: r.ask } : {}), ...(r.proposals?.length ? { proposals: r.proposals } : {}) }].slice(-MAX_CHAT_MSGS);
     } catch (e) {
-      if (ctrl.signal.aborted) { setSending(false); return; }
+      if (ctrl.signal.aborted || abortRef.current !== ctrl) return;
       toast.push(errorMessage(e), 'error');
-      final = [...base, { id: ++seq.current, role: 'assistant', content: errorMessage(e), error: true, at: Date.now() }];
-    } finally { setSending(false); }
+      final = [...base, { id: ++seq.current, role: 'assistant' as const, content: errorMessage(e), error: true, at: Date.now() }].slice(-MAX_CHAT_MSGS);
+    } finally { if (abortRef.current === ctrl) { abortRef.current = null; setSending(false); setLiveReply(''); } }
     setMsgs(final);
-    const now = Date.now();
-    saveChat({
-      id: sid, title: prev?.title ?? titleFrom(text), ...(prev?.pinned ? { pinned: true } : {}), connName: conn.name, ...(conn.profileId ? { profileId: conn.profileId } : {}),
-      createdAt: prev?.createdAt ?? now, updatedAt: now, ...(prev?.summary ? { summary: prev.summary } : {}), summarized: prev?.summarized ?? 0, messages: toStored(final),
-    });
+    persist(final);
     void summarize(sid, conn, llm);
   };
 
   /** Best-effort: fold messages that left the verbatim window into the session summary (one extra LLM call, no table metadata). */
   const summarize = async (sid: string, c: NonNullable<typeof conn>, choice: AgentLlmChoice | null) => {
     const s = getChats().find((x) => x.id === sid);
-    const older = s ? pendingSummary(s) : [];
-    if (!s || older.length === 0) return;
+    const older = s ? pendingSummary(s, settings?.runtime.memory) : [];
+    if (!s || older.length === 0 || summaryRuns.current.has(sid)) return;
+    const ctrl = new AbortController();
+    summaryRuns.current.set(sid, ctrl);
+    const covered = s.messages.length - (settings?.runtime.memory.keepRecent ?? DEFAULT_RUNTIME.memory.keepRecent);
     try {
-      const r = await agentApi.chat(buildChatBody(c, [], false, [summaryRequest(s.summary, older)], null, choice, { plain: true }));
-      const summary = r.reply.replace(/```[\s\S]*?```/g, '').trim().slice(0, 1500);
+      const r = await agentApi.chat(buildChatBody(c, [], false, [summaryRequest(s.summary, older, settings?.runtime.memory)], null, choice, { plain: true }), ctrl.signal);
+      const summary = r.reply.replace(/```[\s\S]*?```/g, '').trim().slice(0, settings?.runtime.memory.summaryOutputChars);
       const cur = getChats().find((x) => x.id === sid);
-      if (cur && summary) saveChat({ ...cur, summary, summarized: s.messages.length - KEEP_RECENT });
+      // Apply only to the same transcript prefix. Storage may have evicted old messages meanwhile.
+      if (!ctrl.signal.aborted && cur && summary && cur.summarized === s.summarized && cur.messages.length >= s.messages.length && s.messages.every((m, i) => cur.messages[i]?.at === m.at && cur.messages[i]?.content === m.content)) {
+        saveChat({ ...cur, summary, summarized: covered });
+      }
     } catch { /* the next message retries */ }
+    finally { summaryRuns.current.delete(sid); }
   };
 
   const pickLlm = (v: string) => {
@@ -223,6 +266,7 @@ export function AgentPanel({ open = true, onClose }: { open?: boolean; onClose?:
           <Button size="sm" variant="ghost" onClick={() => setView((v) => (v === 'memory' ? 'chat' : 'memory'))} aria-label={t('memory.title')} title={t('memory.title')} aria-pressed={view === 'memory'}><Icon name="snippet" /></Button>
           <Button size="sm" variant="ghost" onClick={() => setShowSetup((v) => !v)} aria-label={t('agent.settings')} title={t('agent.settings')} aria-pressed={showSetup}><Icon name="settings" /></Button>
         </>)}
+        {can('agent:use') && <Button size="sm" variant="ghost" onClick={() => setView((v) => v === 'personal' ? 'chat' : 'personal')} aria-label={t('personal.title')} title={t('personal.title')} aria-pressed={view === 'personal'}><Icon name="agent" /></Button>}
         {onClose && <Button size="sm" variant="ghost" onClick={onClose} aria-label={t('agent.collapse')} title={t('agent.collapse')}>–</Button>}
       </div>
       {settings && tokenState?.configured && llm && (
@@ -231,6 +275,15 @@ export function AgentPanel({ open = true, onClose }: { open?: boolean; onClose?:
             <Icon name="agent" />
             <select aria-label={t('agent.chatModel')} value={choiceValue(llm)} onChange={(e) => pickLlm(e.target.value)} disabled={sending}>
               {settings.endpoints.flatMap((e) => e.models.map((m) => <option key={`${e.id}/${m}`} value={choiceValue({ endpointId: e.id, model: m })}>{e.label} — {m}</option>))}
+            </select>
+            <span className="agent-pill__chev"><Icon name="chevron" /></span>
+          </label>
+          <label className="agent-pill agent-pill--model">
+            <Icon name="agent" />
+            <select aria-label={t('personal.chooseAgent')} value={agentName} disabled={sending} onChange={(e) => { newChat(); setAgentName(e.target.value); }}>
+              <option value="">{t('personal.auto')}</option>
+              {agentName && !personalAgents.some((a) => a.enabled && a.name === agentName) && <option value={agentName} disabled>{t('personal.unavailable')}</option>}
+              {personalAgents.filter((a) => a.enabled).map((a) => <option key={a.name} value={a.name}>{a.label}</option>)}
             </select>
             <span className="agent-pill__chev"><Icon name="chevron" /></span>
           </label>
@@ -250,13 +303,14 @@ export function AgentPanel({ open = true, onClose }: { open?: boolean; onClose?:
   return (
     <section aria-label={t('agent.title')} className="agent-popup__panel">
       {header}
-      {(!tokenState.configured || showSetup) && (
+      {view !== 'personal' && (!tokenState.configured || showSetup) && (
         <div style={{ overflow: 'auto', flex: tokenState.configured ? '0 0 auto' : 1, maxHeight: tokenState.configured ? 360 : undefined }}>
           <TokenSetup key={String(tokenState.configured) + tokenState.model} settings={settings} state={tokenState} onChanged={() => void load()} />
           <OpenMetadataSetup />
         </div>
       )}
       {tokenState.configured && view === 'sessions' && <SessionList activeId={sessionId} onOpen={openSession} onNew={newChat} />}
+      {view === 'personal' && <PersonalAgentsManager dialect={conn?.driver} />}
       {tokenState.configured && view === 'memory' && (
         <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
           <ContextNotes profileId={conn?.profileId} connName={conn?.name} />
@@ -271,7 +325,7 @@ export function AgentPanel({ open = true, onClose }: { open?: boolean; onClose?:
               <Button size="sm" variant="ghost" onClick={() => db.setAgentRows(null)}>{t('agent.rowsRemove')}</Button>
             </div>
           )}
-          <div ref={listRef} style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 8, display: 'flex', flexDirection: 'column', gap: 8 }} aria-live="polite" aria-label={t('agent.conversation')}>
+          <div ref={listRef} onScroll={(e) => { const el = e.currentTarget; followReply.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48; }} style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 8, display: 'flex', flexDirection: 'column', gap: 8 }} aria-live="polite" aria-label={t('agent.conversation')}>
             {msgs.length === 0 && (
               <div className="agent-welcome">
                 <div className="agent-welcome__icon"><Icon name="database" /></div>
@@ -329,6 +383,7 @@ export function AgentPanel({ open = true, onClose }: { open?: boolean; onClose?:
                 </>)}
               </div>
             ))}
+            {sending && liveReply && <div className="ui-card agent-msg agent-msg--assistant" style={{ padding: 8, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{liveReply}</div>}
             {sending && <div className="ui-row"><Spinner label={t('agent.thinking')} /> <LiveStatus events={live} /></div>}
           </div>
           <form className="agent-input" onSubmit={(e) => { e.preventDefault(); void send(); }}>
@@ -355,6 +410,7 @@ export function AgentPanel({ open = true, onClose }: { open?: boolean; onClose?:
                 <input ref={fileRef} type="file" accept="image/*" multiple hidden onChange={(e) => { void addImages(imageFiles(e.target.files)); e.target.value = ''; }} />
                 <button type="button" className="agent-tool" disabled={!conn || images.length >= MAX_IMAGES} title={t('agent.attachImage')} onClick={() => fileRef.current?.click()}>🖼 {t('agent.imageBtn')}</button>
                 <span style={{ flex: 1 }} />
+                {sending && <Button type="button" variant="ghost" onClick={cancelRun}>{t('common.cancel')}</Button>}
                 <Button type="submit" variant="primary" disabled={!conn || (!draft.trim() && images.length === 0)} loading={sending}>{t('agent.send')} <Icon name="send" /></Button>
               </div>
             </div>
@@ -364,4 +420,4 @@ export function AgentPanel({ open = true, onClose }: { open?: boolean; onClose?:
       )}
     </section>
   );
-}
+});

@@ -9,6 +9,8 @@ export default defineConfig(() => {
   return {
     base: desktop ? './' : '/',
     plugins: [react()],
+    envDir: '../..',
+    worker: { format: 'es' as const },
     server: {
       port: 5173,
       proxy: { '/api': { target: process.env.VITE_DEV_API ?? 'http://localhost:8080', changeOrigin: false } },

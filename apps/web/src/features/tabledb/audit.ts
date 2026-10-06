@@ -10,7 +10,9 @@ export interface AuditSubject { targetId?: string; custom?: CustomEndpoint }
 export type QueryAudit = AuditSubject & { mode: 'read' | 'write'; kind: AuditKind; sql: string; ok: boolean; rows?: number; ms?: number; errorCode?: string };
 /** Session lifecycle. */
 export type SessionAudit = AuditSubject & { event: 'open' | 'open_failed' | 'close'; authType: string; route?: string };
-export type AuditRecord = QueryAudit | SessionAudit;
+export interface AuditContext { catalog?: string; schema?: string; table?: string }
+export type ActivityAudit = AuditSubject & AuditContext & { event: 'table_view' | 'export'; ok: boolean; sql?: string; format?: string; scope?: 'view' | 'all' | 'selection' | 'cell'; rows?: number; ms?: number; errorCode?: string };
+export type AuditRecord = (QueryAudit & AuditContext) | SessionAudit | ActivityAudit;
 
 const MAX_SQL = 65_536;
 const KINDS: readonly string[] = ['read', 'write', 'ddl', 'other'];
@@ -34,12 +36,23 @@ function subjectBody(x: Record<string, unknown>): Record<string, unknown> {
 
 export function toWireBody(r: AuditRecord): Record<string, unknown> {
   const x = r as unknown as Record<string, unknown>;
+  const context = Object.fromEntries(['catalog', 'schema', 'table'].flatMap((k) => typeof x[k] === 'string' ? [[k, (x[k] as string).slice(0, 256)]] : []));
+  if (x.event === 'table_view' || x.event === 'export') {
+    const rows = num(x.rows), ms = num(x.ms);
+    return { ...subjectBody(x), ...context, event: x.event, ok: x.ok === true,
+      ...(typeof x.sql === 'string' ? { sql: x.sql.slice(0, MAX_SQL) } : {}),
+      ...(typeof x.format === 'string' ? { format: x.format.slice(0, 16) } : {}),
+      ...(typeof x.scope === 'string' ? { scope: x.scope } : {}),
+      ...(rows !== undefined ? { rows } : {}), ...(ms !== undefined ? { ms } : {}),
+      ...(typeof x.errorCode === 'string' ? { errorCode: x.errorCode.slice(0, 40) } : {}),
+    };
+  }
   if (typeof x.event === 'string') {
     return { ...subjectBody(x), event: x.event, authType: String(x.authType), ...(typeof x.route === 'string' && x.route ? { route: x.route.slice(0, 300) } : {}) };
   }
   const rows = num(x.rows), ms = num(x.ms);
   return {
-    ...subjectBody(x),
+    ...subjectBody(x), ...context,
     mode: x.mode === 'write' ? 'write' : 'read',
     kind: KINDS.includes(x.kind as string) ? x.kind : 'other',
     sql: String(x.sql ?? '').slice(0, MAX_SQL),

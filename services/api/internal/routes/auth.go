@@ -3,6 +3,7 @@ package routes
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"regexp"
 	"time"
@@ -77,6 +78,28 @@ func roleStrings(p *shared.Principal) []string {
 var loopbackRe = regexp.MustCompile(`^http://127\.0\.0\.1:\d{2,5}/cb$`)
 var emailRe = regexp.MustCompile(`^[^\s@]+@[^\s@]+\.[^\s@]+$`)
 
+// auditLoginFailure records only trusted identity and bounded error codes, never
+// callback parameters, broker tokens, or upstream error text.
+func (h *H) auditLoginFailure(r *http.Request, entry audit.Entry, result *error) {
+	if *result == nil {
+		return
+	}
+	reason := apperr.Internal
+	var ae *apperr.Error
+	var ve *shared.ValidationError
+	if errors.As(*result, &ae) {
+		reason = ae.Code
+	} else if errors.As(*result, &ve) {
+		reason = apperr.ValidationCode
+	}
+	entry.Action = "auth.login_failed"
+	entry.IP = h.D.ClientIP(r)
+	entry.Detail["reason"] = string(reason)
+	if err := audit.Write(r.Context(), h.D.DB, entry); err != nil {
+		*result = err
+	}
+}
+
 func (h *H) registerAuth(rt *app.Router) {
 	d := h.D
 	loginRate := &app.Rate{Max: 30, Window: time.Minute}
@@ -137,7 +160,9 @@ func (h *H) registerAuth(rt *app.Router) {
 		return nil
 	})
 
-	rt.GET("/auth/callback", P, func(w http.ResponseWriter, r *http.Request) error {
+	rt.GET("/auth/callback", P, func(w http.ResponseWriter, r *http.Request) (result error) {
+		failure := audit.Entry{ActorLabel: "anonymous", Detail: map[string]any{"via": "oidc", "kind": "web"}}
+		defer func() { h.auditLoginFailure(r, failure, &result) }()
 		q := r.URL.Query()
 		state, err := requiredQuery(r, "state")
 		if err != nil {
@@ -163,6 +188,7 @@ func (h *H) registerAuth(rt *app.Router) {
 		if err != nil {
 			return err
 		}
+		failure.Detail["provider"] = p.ID
 		redirectURI := d.Cfg.PublicURL + "/api/v1/auth/callback"
 		idToken, err := d.OIDC.Exchange(ctx, p, auth.ExchangeOpts{Code: code, Verifier: stVerifier, RedirectURI: redirectURI})
 		if err != nil {
@@ -176,10 +202,14 @@ func (h *H) registerAuth(rt *app.Router) {
 		if stStepup && nowSec-claims.AuthTime > 120 {
 			return apperr.Unauth("identity provider did not re-authenticate the user")
 		}
+		if claims.EmailVerified {
+			failure.ActorLabel = claims.Email
+		}
 		userID, err := auth.UpsertUser(ctx, d.DB, d.Cfg, auth.Claims{Provider: p.ID, Sub: claims.Sub, Email: claims.Email, EmailVerified: claims.EmailVerified, Name: claims.Name})
 		if err != nil {
 			return err
 		}
+		failure.ActorID = userID
 		authTime := d.Now()
 		if claims.AuthTime != 0 {
 			authTime = time.Unix(claims.AuthTime, 0)
@@ -276,7 +306,9 @@ func (h *H) registerAuth(rt *app.Router) {
 		return nil
 	})
 
-	rt.POST("/auth/desktop/exchange", P, func(w http.ResponseWriter, r *http.Request) error {
+	rt.POST("/auth/desktop/exchange", P, func(w http.ResponseWriter, r *http.Request) (result error) {
+		failure := audit.Entry{ActorLabel: "anonymous", Detail: map[string]any{"via": "oidc", "kind": "desktop"}}
+		defer func() { h.auditLoginFailure(r, failure, &result) }()
 		body, err := app.ReadBody(w, r, app.JSONBodyLimit)
 		if err != nil {
 			return err
@@ -296,6 +328,7 @@ func (h *H) registerAuth(rt *app.Router) {
 		if err != nil {
 			return err
 		}
+		failure.Detail["provider"] = p.ID
 		ctx := r.Context()
 		idToken, err := d.OIDC.Exchange(ctx, p, auth.ExchangeOpts{Code: code, Verifier: verifier, RedirectURI: redirectURI, Desktop: true})
 		if err != nil {
@@ -305,10 +338,14 @@ func (h *H) registerAuth(rt *app.Router) {
 		if err != nil {
 			return err
 		}
+		if claims.EmailVerified {
+			failure.ActorLabel = claims.Email
+		}
 		userID, err := auth.UpsertUser(ctx, d.DB, d.Cfg, auth.Claims{Provider: p.ID, Sub: claims.Sub, Email: claims.Email, EmailVerified: claims.EmailVerified, Name: claims.Name})
 		if err != nil {
 			return err
 		}
+		failure.ActorID = userID
 		authTime := d.Now()
 		if claims.AuthTime != 0 {
 			authTime = time.Unix(claims.AuthTime, 0)
@@ -331,7 +368,9 @@ func (h *H) registerAuth(rt *app.Router) {
 
 	// Desktop login through the VNPAY SSO broker: the app obtained a broker JWT on its loopback listener; we ask who it is.
 	genaiRate := &app.Rate{Max: d.Cfg.LoginRateLimitPerMin, Window: time.Minute}
-	rt.POST("/auth/desktop/genai", app.Opts{Public: true, Rate: genaiRate}, func(w http.ResponseWriter, r *http.Request) error {
+	rt.POST("/auth/desktop/genai", app.Opts{Public: true, Rate: genaiRate}, func(w http.ResponseWriter, r *http.Request) (result error) {
+		failure := audit.Entry{ActorLabel: "anonymous", Detail: map[string]any{"via": "genai", "kind": "desktop"}}
+		defer func() { h.auditLoginFailure(r, failure, &result) }()
 		body, err := app.ReadBody(w, r, app.JSONBodyLimit)
 		if err != nil {
 			return err
@@ -344,19 +383,14 @@ func (h *H) registerAuth(rt *app.Router) {
 		ctx := r.Context()
 		id, err := d.Genai.Verify(ctx, token)
 		if err != nil {
-			detail := map[string]any{"via": "genai"}
-			if ae, ok := err.(*apperr.Error); ok {
-				detail["reason"] = string(ae.Code)
-			}
-			if aerr := audit.Write(ctx, d.DB, audit.Entry{ActorLabel: "anonymous", Action: "auth.login_failed", IP: d.ClientIP(r), Detail: detail}); aerr != nil {
-				return aerr
-			}
 			return err
 		}
+		failure.ActorLabel = id.Email
 		userID, err := auth.UpsertUser(ctx, d.DB, d.Cfg, auth.Claims{Provider: "genai", Sub: id.Email, Email: id.Email, EmailVerified: true, Name: id.Name})
 		if err != nil {
 			return err
 		}
+		failure.ActorID = userID
 		s, err := auth.CreateSession(ctx, d.DB, auth.NewSession{UserID: userID, Kind: shared.ClientDesktop, AuthTime: d.Now(), WithRefresh: true})
 		if err != nil {
 			return err

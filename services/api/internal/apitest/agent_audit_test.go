@@ -7,10 +7,16 @@ import (
 	"testing"
 )
 
-// The Agent runs in the desktop app; the server only keeps its audit trail (POST /agent/audit).
+// The Agent runs in desktop; server provides deployment config and audit.
 func TestAgentAudit(t *testing.T) {
 	h := harness(t)
 	alice := h.User("alice@vnpay.vn")
+	t.Run("desktop bootstrap configuration is available before login", func(t *testing.T) {
+		r := h.Anon("GET", "/desktop/config")
+		status(t, r, 200, "desktop config")
+		eq(t, r.Get("genaiInternalConnectPort").(float64), 47613.0, "callback port")
+		eq(t, obj(r.Get("sidecar"))["maxHeapMb"].(float64), 512.0, "heap")
+	})
 	last := func(action string) (map[string]any, string, string) {
 		h.T.Helper()
 		var raw []byte
@@ -22,6 +28,16 @@ func TestAgentAudit(t *testing.T) {
 		_ = json.Unmarshal(raw, &m)
 		return m, rtype, rid
 	}
+
+	t.Run("serves deployment config only to authenticated Agent users", func(t *testing.T) {
+		eq(t, h.Anon("GET", "/agent/config").Status, 401, "anonymous config")
+		r := alice.Req("GET", "/agent/config")
+		status(t, r, 200, "agent config")
+		eq(t, r.Str("defaultModel"), "v_kimi", "default model")
+		endpoints := r.Get("endpoints").([]any)
+		eq(t, len(endpoints), 2, "endpoint count")
+		eq(t, obj(endpoints[0])["baseUrl"].(string), "https://genai.vnpay.vn/aigateway/llm_kimi/v1", "base URL")
+	})
 
 	t.Run("agent routes of the old server-side Agent are gone", func(t *testing.T) {
 		for _, c := range [][2]string{{"POST", "/agent/chat"}, {"POST", "/agent/chat/stream"}, {"POST", "/agent/context-preview"}, {"GET", "/agent/settings"}, {"PUT", "/agent/token"}, {"GET", "/agent/openmetadata/token"}} {

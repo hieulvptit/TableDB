@@ -1,3 +1,4 @@
+import { dbRuntimeConfig, bounded } from '../features/tabledb/runtimeConfig';
 import { desktopCommands, tauriListen } from '../runtime/tauri';
 import { toGatewayError } from './errors';
 import type { DbGateway, GatewayEvent, RpcOptions, SessionInfo, SessionRequest, TestResult, Unsubscribe } from './types';
@@ -53,6 +54,16 @@ export class TauriGateway implements DbGateway {
   }
   async rpc<T>(sessionId: string, method: string, params: Record<string, unknown> = {}, opts: RpcOptions = {}): Promise<T> {
     if (opts.signal?.aborted) throw new GatewayError('E_CANCELLED', 'cancelled');
+    if (method === 'query.execute' || method === 'query.plan' || method === 'query.fetch') {
+      const c = dbRuntimeConfig();
+      params = { ...params };
+      if (method === 'query.execute') {
+        params.maxRows = bounded(params.maxRows as number | undefined, c.defaultMaxRows, c.maxRows);
+        params.pageSize = bounded(params.pageSize as number | undefined, c.pageSize, 5000);
+      }
+      if (method === 'query.fetch') params.count = bounded(params.count as number | undefined, c.pageSize, 5000);
+      else params.timeoutSec = bounded(params.timeoutSec as number | undefined, c.defaultTimeoutSec, c.maxTimeoutSec);
+    }
     // Cursor/cancel methods carry their own ids (protocol has no sessionId there); everything else is session-scoped.
     const body = CURSOR_METHODS.has(method) ? params : { sessionId, ...params };
     try { return (await this.bridge.request(method, body)) as T; } catch (e) { throw toGatewayError(e); }

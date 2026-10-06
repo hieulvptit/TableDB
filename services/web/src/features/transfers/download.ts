@@ -1,3 +1,6 @@
+import { startSecureDownload, WEB_SERVER_PUBLIC_KEY } from '@vnpay/shared';
+import workerUrl from './secureDownload.worker?worker&url';
+import { apiClient } from '../../api/client';
 import { transfersApi } from '../../api/services';
 
 /**
@@ -10,5 +13,5 @@ export async function downloadTicket(id: string): Promise<void> {
   // page origin so credentials never go elsewhere.
   const u = new URL(url, window.location.origin);
   if (!/\/transfers\/[^/]+\/download$/.test(u.pathname) || !u.searchParams.get('t')) throw new Error('unexpected download URL');
-  window.location.assign(u.pathname + u.search);
+  await startSecureDownload(workerUrl, apiClient.baseUrl, import.meta.env.VITE_SECURE_WEB_PUBLIC_KEY ?? WEB_SERVER_PUBLIC_KEY, u.pathname + u.search);
 }

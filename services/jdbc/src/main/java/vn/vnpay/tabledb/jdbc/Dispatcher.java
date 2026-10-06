@@ -98,6 +98,8 @@ public final class Dispatcher implements AutoCloseable {
     public Map<String, Object> handle(Map<String, Object> req) {
         Object id = req.get("id");
         if (id != null && !(id instanceof Long) && !(id instanceof String)) return error(null, RpcError.badRequest("id must be a number or string"));
+        // Bound the echoed envelope before any cursor advances; an oversized error id is omitted too.
+        if (id instanceof String sid && sid.length() > 256) return error(null, RpcError.badRequest("id string must be at most 256 characters"));
         try {
             if (id == null) throw RpcError.badRequest("id is required");
             Object m = req.get("method");
@@ -109,6 +111,15 @@ public final class Dispatcher implements AutoCloseable {
             Map<String, Object> resp = new LinkedHashMap<>();
             resp.put("id", id);
             resp.put("result", result);
+            if (Json.write(resp).getBytes(java.nio.charset.StandardCharsets.UTF_8).length >= StdioServer.MAX_LINE) {
+                Object cid = result.get("cursorId");
+                if (cid instanceof String cursorId) {
+                    Cursor c = sessions.cursor(cursorId);
+                    c.session.lock.lock();
+                    try { c.close(); sessions.dropCursor(cursorId); } finally { c.session.lock.unlock(); }
+                }
+                throw RpcError.limit("response exceeds 8 MiB; reduce selected columns or lobLimit");
+            }
             return resp;
         } catch (RpcError e) {
             return error(id, e);
@@ -392,6 +403,7 @@ public final class Dispatcher implements AutoCloseable {
         try {
             s.lock.lock();
             try {
+                if (s.closed) throw RpcError.notFound("unknown session");
                 s.touch();
                 Session.CURRENT.set(s.id);
                 return fn.apply(s);
@@ -582,7 +594,7 @@ public final class Dispatcher implements AutoCloseable {
             // further results (procedure calls, Oracle implicit results) — only when the first one is fully delivered,
             // since moving on would close its result set
             if (!handedOff) {
-                List<Map<String, Object>> more = moreResults(s, st, Math.min(maxRows, 1000), pageSize, x.limits());
+                List<Map<String, Object>> more = moreResults(s, st, Math.min(maxRows, 1000), pageSize, x.limits(), Cursor.PAGE_BYTE_BUDGET - Json.write(out).getBytes(java.nio.charset.StandardCharsets.UTF_8).length);
                 if (!more.isEmpty()) out.put("moreResults", more);
                 msgs.addAll(warnings(st.getWarnings()).stream().filter(m -> !msgs.contains(m)).toList());
             }
@@ -592,7 +604,12 @@ public final class Dispatcher implements AutoCloseable {
             out.put("txPending", s.dirty);
             out.put("elapsedMs", (System.nanoTime() - x.t0()) / 1_000_000L);
             return out;
-        } catch (SQLException e) {
+        } catch (SQLException | RuntimeException e) {
+            if (handedOff && cursor != null) {
+                cursor.close();
+                sessions.dropCursor(cursor.id);
+                handedOff = false;
+            }
             if (rq.cancelled) throw new RpcError("E_CANCELLED", "query cancelled");
             if (rq.timedOut) throw new RpcError("E_TIMEOUT", "query exceeded timeout of " + timeoutSec + "s", null, 0, true);
             throw e;
@@ -609,10 +626,10 @@ public final class Dispatcher implements AutoCloseable {
     }
 
     /** Remaining results of a statement, each read eagerly (bounded rows and bytes). */
-    private List<Map<String, Object>> moreResults(Session s, Statement st, int maxRows, int pageSize, ValueEncoder.Limits lim) {
+    private List<Map<String, Object>> moreResults(Session s, Statement st, int maxRows, int pageSize, ValueEncoder.Limits lim, long budget) {
         List<Map<String, Object>> out = new ArrayList<>();
         long bytes = 0;
-        for (int k = 0; k < MAX_MORE_RESULTS && bytes < Cursor.PAGE_BYTE_BUDGET; k++) {
+        for (int k = 0; k < MAX_MORE_RESULTS; k++) {
             boolean isRs;
             long uc;
             try {
@@ -631,7 +648,6 @@ public final class Dispatcher implements AutoCloseable {
                     Cursor.Page pg = c.fetch(maxRows);
                     r.put("rows", pg.rows());
                     r.put("truncated", pg.hasMore() || pg.truncated());
-                    for (List<Object> row : pg.rows()) for (Object v : row) bytes += ValueEncoder.approxSize(v);
                     c.close();
                 } catch (SQLException e) {
                     Log.debug("reading a further result failed: " + e.getClass().getSimpleName());
@@ -642,6 +658,9 @@ public final class Dispatcher implements AutoCloseable {
                 r.put("rows", List.of());
                 r.put("updateCount", uc);
             }
+            long resultBytes = Json.write(r).getBytes(java.nio.charset.StandardCharsets.UTF_8).length + 1;
+            if (bytes + resultBytes > budget) throw RpcError.limit("additional results exceed response byte budget");
+            bytes += resultBytes;
             out.add(r);
         }
         return out;
@@ -673,21 +692,40 @@ public final class Dispatcher implements AutoCloseable {
     private Map<String, Object> fetch(Params p) {
         Cursor c = sessions.cursor(p.reqStr("cursorId"));
         int count = p.intCapped("count", c.pageSize, 1, 5000);
-        Map<String, Object> out = runOn(c.session, s -> {
-            if (c.isClosed()) throw RpcError.notFound("unknown cursor");
-            Cursor.Page page = c.fetch(count);
-            Map<String, Object> m = new LinkedHashMap<>();
-            m.put("rows", page.rows());
-            m.put("hasMore", page.hasMore());
-            m.put("truncated", page.truncated());
-            return m;
-        });
-        if (c.isClosed()) sessions.dropCursor(c.id);
-        return out;
+        Running rq = new Running();
+        rq.stmt = c.statement();
+        if (running.putIfAbsent(c.id, rq) != null) throw RpcError.limit("cursor fetch already in progress");
+        ScheduledFuture<?> timer = watchdog.schedule(() -> {
+            rq.timedOut = true;
+            try { rq.stmt.cancel(); } catch (SQLException | RuntimeException ignored) { }
+        }, 105, TimeUnit.SECONDS);
+        try {
+            return runOn(c.session, s -> {
+                if (c.isClosed()) throw RpcError.notFound("unknown cursor");
+                try {
+                    if (rq.cancelled) throw new RpcError("E_CANCELLED", "fetch cancelled");
+                    if (rq.timedOut) throw new RpcError("E_TIMEOUT", "fetch exceeded timeout", null, 0, true);
+                    Cursor.Page page = c.fetch(count);
+                    if (rq.cancelled) throw new RpcError("E_CANCELLED", "fetch cancelled");
+                    if (rq.timedOut) throw new RpcError("E_TIMEOUT", "fetch exceeded timeout", null, 0, true);
+                    return Map.of("rows", page.rows(), "hasMore", page.hasMore(), "truncated", page.truncated());
+                } catch (SQLException | RuntimeException e) {
+                    c.close();
+                    if (rq.cancelled) throw new RpcError("E_CANCELLED", "fetch cancelled");
+                    if (rq.timedOut) throw new RpcError("E_TIMEOUT", "fetch exceeded timeout", null, 0, true);
+                    throw e;
+                }
+            });
+        } finally {
+            timer.cancel(false);
+            running.remove(c.id, rq);
+            if (c.isClosed()) sessions.dropCursor(c.id);
+        }
     }
 
     private Map<String, Object> cancel(Params p) {
-        Running rq = running.get(p.reqStr("queryId"));
+        String cursorId = p.str("cursorId");
+        Running rq = running.get(cursorId != null ? cursorId : p.reqStr("queryId"));
         if (rq == null) return Map.of("cancelled", false);
         rq.cancelled = true;
         Statement st = rq.stmt;

@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { Budget, LIMITS, newShared, parseToolCalls, runLoop, sanitizeBlock, type ChatMsg, type RunShared, type ToolDef } from './harness';
+import { describe, expect, it, vi } from 'vitest';
+import { Budget, LIMITS, newShared, parseToolCalls, runLoop, sanitizeBlock, withDeadline, type ChatMsg, type RunShared, type ToolDef } from './harness';
 import { askUserTool, grepTool, proposeContextTool, readFileTool, writeTodosTool } from './tools';
 import { runAgent, type AgentInput } from './orchestrator';
 import { BUNDLED_SKILLS, SkillRegistry, bundledRegistry } from './skills';
@@ -26,6 +26,39 @@ const run = (sh: RunShared, tools: ToolDef[]) => runLoop({ shared: sh, messages:
 const last = (m: ChatMsg[]) => m[m.length - 1]!.content;
 
 describe('harness loop', () => {
+  it('does not start a final LLM call after the deadline has expired', async () => {
+    const { sh, seen } = mk(['should never run'], new Budget(14, 24, -1));
+    await expect(run(sh, [])).rejects.toThrow('deadline');
+    expect(seen).toHaveLength(0);
+  });
+
+  it('aborts a pending operation at the wall-clock deadline and clears its timer', async () => {
+    vi.useFakeTimers();
+    try {
+      let signal: AbortSignal | undefined;
+      const request = withDeadline(50, undefined, async (sig) => { signal = sig; return new Promise<string>(() => {}); });
+      const rejected = expect(request).rejects.toThrow('deadline');
+      await vi.advanceTimersByTimeAsync(50);
+      await rejected;
+      expect(signal?.aborted).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('streams parent text but hides tool blocks and subagent output', async () => {
+    const live: string[] = [];
+    let n = 0;
+    const sh = newShared({ nonce: 'stream', onText: (s) => live.push(s), chat: async (_m, _sig, onText) => {
+      if (++n === 1) { onText?.('```to'); onText?.(call('echo', { v: 'x' })); return call('echo', { v: 'x' }); }
+      onText?.('Final'); onText?.('Final answer'); return 'Final answer';
+    } });
+    expect(await run(sh, [echo])).toBe('Final answer');
+    expect(live).toEqual(['', '', 'Final', 'Final answer']);
+    expect(live.join('')).not.toContain('arguments');
+    const child = newShared({ nonce: 'child', onText: (s) => live.push(s), chat: async (_m, _sig, onText) => { onText?.('private draft'); return 'child report'; } });
+    await runLoop({ shared: child, messages: start, tools: [], depth: 1, maxSteps: 4 });
+    expect(live).not.toContain('private draft');
+  });
   it('runs parallel calls and returns results together', async () => {
     const { sh, seen } = mk([call('echo', { v: 'a' }, 'echo', { v: 'b' }), 'done']);
     expect(await run(sh, [echo])).toBe('done');
@@ -87,6 +120,18 @@ describe('harness loop', () => {
     expect(await run(sh, [echo])).toBe('forced final');
     expect(sh.budget.llmCalls).toBe(6);
     expect(last(seen[seen.length - 1]!)).toMatch(/Tool budget exhausted/);
+  });
+
+  it('keeps the parent synthesis call when parallel children need final answers', async () => {
+    const { sh, seen } = mk(['child report', 'parent synthesis'], new Budget(2, 24));
+    const child = () => runLoop({ shared: sh, messages: start, tools: [], depth: 1, maxSteps: 5 });
+    const reports = await Promise.all([child(), child()]);
+    expect(reports[0]).toBe('child report');
+    expect(reports[1]).toMatch(/Sub-agent budget exhausted/);
+    expect(sh.budget.llmLeft()).toBe(1);
+    expect(await run(sh, [])).toBe('parent synthesis');
+    expect(seen).toHaveLength(2);
+    expect(sh.budget.llmCalls).toBe(2);
   });
 
   it('stops retrying failing approaches and repeated identical calls', async () => {
@@ -252,3 +297,12 @@ describe('skills', () => {
   });
 });
 
+it('keeps server limits isolated between simultaneous runs', async () => {
+ const limits = { ...LIMITS, maxParallel: 1, maxLlmCalls: 3 };
+ let ca = 0, cb = 0;
+ const a = newShared({ nonce: 'a', limits, chat: async () => ca++ === 0 ? call('echo', { v: 1 }, 'echo', { v: 2 }) : 'done' });
+ const b = newShared({ nonce: 'b', limits: { ...LIMITS, maxParallel: 2, maxLlmCalls: 3 }, chat: async () => cb++ === 0 ? call('echo', { v: 1 }, 'echo', { v: 2 }) : 'done' });
+ await Promise.all([run(a, [echo]), run(b, [echo])]);
+ expect(a.budget.toolCalls).toBe(1);
+ expect(b.budget.toolCalls).toBe(2);
+});

@@ -1,3 +1,5 @@
+import { TEST_DB_CONFIG } from '../../test/dbConfig';
+import { DEFAULT_RUNTIME } from '../agent/runtimeConfig';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
@@ -20,8 +22,8 @@ beforeEach(() => {
   calls = []; sidecar = [];
   (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {
     invoke: async (cmd: string, args?: Record<string, unknown>) => {
-      // the Agent is local: settings come from config.json (Rust), the token metadata from the credential store
-      if (cmd === 'agent_config') return { endpoints: [{ id: 'e1', label: 'LLM', baseUrl: 'https://llm.example.vn/v1', models: ['m1'] }], defaultEndpointId: 'e1', defaultModel: 'm1', budgetChars: 12000, openMetadataEnabled: false };
+      // the Agent is local: settings come from the server through Rust, the token metadata from the credential store
+      if (cmd === 'agent_config') return { status: 200, body: JSON.stringify({ runtime: DEFAULT_RUNTIME, endpoints: [{ id: 'e1', label: 'LLM', baseUrl: 'https://llm.example.vn/v1', models: ['m1'] }], defaultEndpointId: 'e1', defaultModel: 'm1', budgetChars: 12000, openMetadataEnabled: false }) };
       if (cmd === 'secret_get') return (args as { key: string }).key === 'agent:meta:llm' ? JSON.stringify({ endpointId: 'e1', model: 'm1', lastVerifiedAt: '2026-01-01T00:00:00Z' }) : null;
       if (cmd !== 'sidecar_request') return null;
       const { method, params } = args as { method: string; params: Record<string, unknown> };
@@ -44,6 +46,7 @@ beforeEach(() => {
     const method = init.method ?? 'GET';
     const body = init.body ? JSON.parse(init.body as string) : undefined;
     calls.push({ url, method, body });
+    if (url.endsWith('/db/config')) return json(TEST_DB_CONFIG);
     if (url.endsWith('/db/targets')) return json([{ id: 't1', name: 'PG UAT', driver: 'postgresql', host: 'h', port: 5432, database: 'app', allowWrite: false, authModes: ['password'] }]);
     if (url.endsWith('/db/audit')) return json({ ok: true }, 201);
     return json({ error: { code: 'NOT_FOUND', message: 'unmocked ' + url } }, 404);

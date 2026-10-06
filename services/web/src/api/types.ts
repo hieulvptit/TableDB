@@ -11,6 +11,9 @@ export interface Me {
 export interface AuthConfig { providers: Array<{ id: string; label: string }>; devLogin: boolean }
 
 export interface TransferOptions {
+  upload: { parallelism: number; maxRetries: number; retryBaseMs: number };
+  approval: { windowHours: number; delegationMaxDays: number };
+  download: { tokenTtlSec: number; reauthMaxAgeSec: number };
   leaders: Array<{ id: string; name: string; email: string }>;
   limits: { maxBytes: number; partBytes: number; allowedExtensions: string[]; defaultTtlHours: number; maxDownloads: number };
 }

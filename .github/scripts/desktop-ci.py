@@ -102,6 +102,8 @@ def prepare():
     sample_path = TAURI / "config.sample.json"
     sample = json.loads(sample_path.read_text(encoding="utf-8"))
     sample["apiBaseUrl"] = origin
+    if os.environ.get("TABLEDB_SERVER_SIGNING_PUBLIC_KEY"):
+        sample["serverSigningPublicKey"] = os.environ["TABLEDB_SERVER_SIGNING_PUBLIC_KEY"]
     sample_path.write_text(json.dumps(sample, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 

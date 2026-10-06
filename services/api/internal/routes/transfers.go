@@ -119,7 +119,7 @@ func (h *H) registerTransfers(rt *app.Router) {
 		}
 		app.WriteJSON(w, 200, map[string]any{"leaders": leaders, "limits": map[string]any{
 			"maxBytes": d.Cfg.MaxUploadBytes, "partBytes": d.Cfg.PartBytes, "allowedExtensions": exts,
-			"defaultTtlHours": d.Cfg.TicketTTLHours, "maxDownloads": d.Cfg.MaxDownloads}})
+			"defaultTtlHours": d.Cfg.TicketTTLHours, "maxDownloads": d.Cfg.MaxDownloads}, "upload": d.Cfg.UploadClient, "approval": map[string]any{"windowHours": d.Cfg.ApprovalWindowHours, "delegationMaxDays": d.Cfg.DelegationMaxDays}, "download": map[string]any{"tokenTtlSec": d.Cfg.DownloadTokenTTLSec, "reauthMaxAgeSec": d.Cfg.DownloadReauthMaxAgeSec}})
 		return nil
 	})
 
@@ -299,7 +299,7 @@ func (h *H) registerTransfers(rt *app.Router) {
 		return nil
 	})
 
-	dlRate := &app.Rate{Max: 20, Window: time.Minute}
+	dlRate := &app.Rate{Max: d.Cfg.DownloadRateLimitPerMin, Window: time.Minute}
 	rt.POST("/transfers/{id}/download-token", app.Opts{Rate: dlRate}, func(w http.ResponseWriter, r *http.Request) error {
 		a, err := app.Need(r, "transfer:download")
 		if err != nil {
@@ -444,8 +444,8 @@ func (h *H) registerTransfers(rt *app.Router) {
 		if strings.EqualFold(to, a.Principal.ID) {
 			return apperr.Validation("cannot delegate to yourself")
 		}
-		if !until.After(from) || until.Sub(from) > 30*24*time.Hour {
-			return apperr.Validation("invalid delegation window (max 30 days)")
+		if !until.After(from) || until.Sub(from) > time.Duration(d.Cfg.DelegationMaxDays)*24*time.Hour {
+			return apperr.Validation(fmt.Sprintf("invalid delegation window (max %d days)", d.Cfg.DelegationMaxDays))
 		}
 		ctx := r.Context()
 		var one string

@@ -4,11 +4,14 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
+	"vnpay/tabledb-api/internal/securetransport"
 )
 
 type OidcProvider struct {
@@ -55,10 +58,12 @@ type PII struct {
 }
 
 type Config struct {
-	Env       string // dev | test | prod
-	Host      string
-	Port      int
-	PublicURL string
+	SecureTransportEnabled bool
+	SecureTransport        securetransport.Settings
+	Env                    string // dev | test | prod
+	Host                   string
+	Port                   int
+	PublicURL              string
 
 	DatabaseURL string
 	PgliteDir   string // data dir for the embedded Postgres (dev/test); name kept for env compatibility
@@ -82,6 +87,14 @@ type Config struct {
 	DevLogMail           bool
 	LoginRateLimitPerMin int
 
+	Desktop                 DesktopConfig
+	DB                      DBConfig
+	UploadClient            UploadClientConfig
+	DownloadTokenTTLSec     int
+	DownloadRateLimitPerMin int
+	DelegationMaxDays       int
+
+	Agent AgentConfig
 	Genai Genai
 	SMTP  SMTP
 
@@ -156,8 +169,8 @@ func Load(src map[string]string) (*Config, error) {
 			return def
 		}
 		f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
-		if err != nil {
-			errs = append(errs, k+": Expected number")
+		if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+			errs = append(errs, k+": Expected finite number")
 			return def
 		}
 		return f
@@ -242,6 +255,51 @@ func Load(src map[string]string) (*Config, error) {
 		InspectEnabled: flag("INSPECT_ENABLED", true), InspectMaxDepth: posInt("INSPECT_MAX_DEPTH", 2, 1), InspectMaxEntries: posInt("INSPECT_MAX_ENTRIES", 10000, 1),
 		InspectMaxBytes: int64(num("INSPECT_MAX_BYTES", 1<<30)), InspectMaxRatio: num("INSPECT_MAX_RATIO", 200), InspectTimeoutSec: num("INSPECT_TIMEOUT_SEC", 120),
 		InspectEntryHashMaxBytes: int64(num("INSPECT_ENTRY_HASH_MAX_BYTES", 64<<20)), InspectNestedMaxBytes: int64(num("INSPECT_NESTED_MAX_BYTES", 64<<20)),
+	}
+
+	c.SecureTransportEnabled = flag("SECURE_TRANSPORT_ENABLED", false)
+	c.SecureTransport = securetransport.Settings{SigningKey: e.str("SECURE_DESKTOP_SIGNING_KEY", ""), WebSigningKey: e.str("SECURE_WEB_SIGNING_KEY", ""), Required: flag("SECURE_TRANSPORT_REQUIRED", true), TTL: time.Duration(posInt("SECURE_SESSION_TTL_SEC", 900, 60)) * time.Second, MaxSessions: posInt("SECURE_MAX_SESSIONS", 1024, 1), MaxRequestBytes: max(c.PartBytes, 1<<20), MaxInFlight: posInt("SECURE_MAX_INFLIGHT", 16, 1), HandshakesPerMinute: posInt("SECURE_HANDSHAKES_PER_MINUTE", 30, 1)}
+	if c.SecureTransportEnabled {
+		if c.SecureTransport.WebSigningKey == "" {
+			errs = append(errs, "SECURE_WEB_SIGNING_KEY required")
+		}
+		if _, err := securetransport.New(c.SecureTransport); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+
+	var desktopErr error
+	c.Desktop, desktopErr = loadDesktop(e.str("DESKTOP_CONFIG", ""))
+	if desktopErr != nil {
+		errs = append(errs, desktopErr.Error())
+	}
+	c.DownloadTokenTTLSec = posInt("DOWNLOAD_TOKEN_TTL_SEC", 60, 1)
+	c.DownloadRateLimitPerMin = posInt("DOWNLOAD_RATE_LIMIT_PER_MIN", 20, 1)
+	c.DelegationMaxDays = posInt("DELEGATION_MAX_DAYS", 30, 1)
+	c.DB = DefaultDBConfig()
+	c.UploadClient = UploadClientConfig{Parallelism: 3, MaxRetries: 3, RetryBaseMs: 500}
+	if err := loadRuntime(e, c); err != nil {
+		errs = append(errs, err.Error())
+	}
+	for _, item := range []struct {
+		name  string
+		value float64
+	}{
+		{"MAX_UPLOAD_BYTES", float64(c.MaxUploadBytes)}, {"PART_BYTES", float64(c.PartBytes)},
+		{"TICKET_TTL_HOURS", c.TicketTTLHours}, {"APPROVAL_WINDOW_HOURS", c.ApprovalWindowHours},
+		{"MAX_DOWNLOADS", float64(c.MaxDownloads)}, {"DOWNLOAD_REAUTH_MAX_AGE_SEC", c.DownloadReauthMaxAgeSec},
+	} {
+		if item.value <= 0 {
+			errs = append(errs, item.name+": must be > 0")
+		}
+	}
+	if c.PartBytes > 64<<20 {
+		errs = append(errs, "PART_BYTES: must be <= 64 MiB")
+	}
+	var agentErr error
+	c.Agent, agentErr = loadAgent(e.str("AGENT_CONFIG", ""), c.Env)
+	if agentErr != nil {
+		errs = append(errs, agentErr.Error())
 	}
 
 	if c.PII.MaxFileBytes > 64<<20 || c.PII.MaxTextBytes > 16<<20 || c.PII.ChunkChars > 32000 || c.PII.TimeoutSec > 900 || c.PII.SampleLines > 1000 {

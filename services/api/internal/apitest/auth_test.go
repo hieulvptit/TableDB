@@ -273,3 +273,23 @@ func TestProdConfigCORS(t *testing.T) {
 		}
 	}
 }
+
+func TestSSOLoginAudit(t *testing.T) {
+	e := newSSO(t)
+	_, code, state := e.login(t, "audit-sso@vnpay.vn", IdpUser{}, "")
+	r := e.Anon("GET", "/auth/callback?code="+code+"&state="+state, Opt{Headers: map[string]string{"User-Agent": "AuditTestBrowser", "X-Request-ID": "sso-audit-request"}})
+	status(t, r, 302, "login")
+	eq(t, Scalar[string](e.Harness, "SELECT actor_label FROM audit_log WHERE action='auth.login' ORDER BY seq DESC LIMIT 1"), "audit-sso@vnpay.vn", "SSO identity")
+	eq(t, Scalar[string](e.Harness, "SELECT detail->>'userAgent' FROM audit_log WHERE action='auth.login' ORDER BY seq DESC LIMIT 1"), "AuditTestBrowser", "browser")
+	status(t, e.cb(code, state, ""), 401, "replay")
+	eq(t, Scalar[int](e.Harness, "SELECT count(*)::int FROM audit_log WHERE action='auth.login_failed'"), 1, "one failure")
+	eq(t, Scalar[string](e.Harness, "SELECT detail->>'reason' FROM audit_log WHERE action='auth.login_failed' ORDER BY seq DESC LIMIT 1"), "UNAUTHENTICATED", "reason code")
+	raw := Scalar[string](e.Harness, "SELECT detail::text FROM audit_log WHERE action='auth.login_failed' ORDER BY seq DESC LIMIT 1")
+	if strings.Contains(raw, code) || strings.Contains(raw, state) {
+		t.Fatal("callback credentials in audit")
+	}
+	status(t, e.Anon("POST", "/auth/desktop/exchange", Opt{Body: map[string]any{}}), 400, "malformed desktop login")
+	eq(t, Scalar[string](e.Harness, "SELECT detail->>'kind' FROM audit_log WHERE action='auth.login_failed' ORDER BY seq DESC LIMIT 1"), "desktop", "desktop failure")
+	status(t, e.Anon("POST", "/auth/desktop/genai", Opt{Body: map[string]any{}}), 400, "malformed broker login")
+	eq(t, Scalar[int](e.Harness, "SELECT count(*)::int FROM audit_log WHERE action='auth.login_failed'"), 3, "no duplicate failures")
+}

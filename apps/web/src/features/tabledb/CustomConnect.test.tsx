@@ -1,3 +1,4 @@
+import { TEST_DB_CONFIG } from '../../test/dbConfig';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
@@ -31,6 +32,7 @@ beforeEach(() => {
     },
   };
   apiClient.configure({ desktop: false, baseUrl: '/api/v1', onStepUp: undefined, fetchImpl: (async (url: string, init: RequestInit) => {
+    if (url.endsWith('/db/config')) return json(TEST_DB_CONFIG);
     if (url.endsWith('/db/targets')) return json([{ id: 't1', name: 'PG UAT', driver: 'postgresql', host: 'h', port: 5432, allowWrite: false, authModes: ['password'] }]);
     if (url.endsWith('/db/audit')) { audits.push(JSON.parse(init.body as string)); return json({ ok: true }, 201); }
     return json({ error: { code: 'NOT_FOUND', message: 'unmocked ' + url } }, 404);
@@ -66,8 +68,8 @@ describe('custom connection mode', () => {
   it('paste -> fields -> session.open with serviceName, read-only, audit carries custom endpoint (no targetId)', async () => {
     const user = userEvent.setup();
     page(auth(perms));
-    await user.type(screen.getByLabelText('Dán nhanh địa chỉ'), 'ora.internal:1521/BISVC');
-    expect(screen.getByLabelText('Máy chủ (IP hoặc hostname)')).toHaveValue('ora.internal');
+    await user.type((await screen.findByLabelText('Dán nhanh địa chỉ')), 'ora.internal:1521/BISVC');
+    expect((await screen.findByLabelText('Máy chủ (IP hoặc hostname)'))).toHaveValue('ora.internal');
     expect(screen.getByLabelText('Cổng')).toHaveValue('1521');
     expect(screen.getByLabelText('Giá trị Service name')).toHaveValue('BISVC');
     await user.type(screen.getByLabelText('Tên đăng nhập'), 'scott');
@@ -87,7 +89,7 @@ describe('custom connection mode', () => {
     page(auth(perms));
     await user.selectOptions(await screen.findByLabelText('Loại cơ sở dữ liệu / driver'), 'custom:mysql8');
     expect(screen.getByLabelText('Cổng')).toHaveValue('3306');
-    await user.type(screen.getByLabelText('Máy chủ (IP hoặc hostname)'), 'my.internal');
+    await user.type((await screen.findByLabelText('Máy chủ (IP hoặc hostname)')), 'my.internal');
     await user.type(screen.getByLabelText('Tên đăng nhập'), 'root');
     await user.click(screen.getAllByRole('button', { name: 'Kết nối' }).at(-1)!);
     const open = await waitFor(() => { const c = sidecar.find((x) => x.method === 'session.open'); expect(c).toBeTruthy(); return c!; });
@@ -97,7 +99,7 @@ describe('custom connection mode', () => {
   it('blocks invalid input client-side (no sidecar call)', async () => {
     const user = userEvent.setup();
     page(auth(perms));
-    await user.type(screen.getByLabelText('Máy chủ (IP hoặc hostname)'), 'bad/host');
+    await user.type((await screen.findByLabelText('Máy chủ (IP hoặc hostname)')), 'bad/host');
     await user.click(screen.getAllByRole('button', { name: 'Kết nối' }).at(-1)!);
     expect(await screen.findByText(/Máy chủ không hợp lệ/)).toBeInTheDocument();
     expect(sidecar.some((c) => c.method === 'session.open')).toBe(false);

@@ -28,7 +28,7 @@ export const enWeb: Record<keyof typeof viWeb, string> = {
   'ap.delegTo': 'Delegate to',
   'ap.validFrom': 'From',
   'ap.validTo': 'To',
-  'ap.rangeInvalid': 'Invalid date range (max 30 days).',
+  'ap.rangeInvalid': 'Invalid date range (max {days} days).',
   'ap.delegAdd': 'Create delegation',
   'ap.delegCreated': 'Delegation created.',
   'ap.delegEmpty': 'No delegations yet.',

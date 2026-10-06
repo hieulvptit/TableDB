@@ -3,6 +3,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
+import ts from 'typescript';
 import type { Permission } from '@vnpay/shared';
 import { AuthContext, type AuthState } from './auth/AuthContext';
 import { DesktopRoutes } from './desktop/routes';
@@ -90,6 +91,47 @@ function resolve(from: string, spec: string): string | null {
   for (const c of [base, `${base}.ts`, `${base}.tsx`, join(base, 'index.ts'), join(base, 'index.tsx')]) if (/\.tsx?$/.test(c) && existsSync(c)) return c;
   return null;
 }
+function runtimeImports(source: string, target?: 'web' | 'desktop'): string[] {
+  const file = ts.createSourceFile('module.tsx', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const imports: string[] = [];
+  const targetCondition = (node: ts.Expression): boolean | undefined => {
+    if (!target || !ts.isBinaryExpression(node)) return undefined;
+    const op = node.operatorToken.kind;
+    if (op !== ts.SyntaxKind.EqualsEqualsEqualsToken && op !== ts.SyntaxKind.ExclamationEqualsEqualsToken) return undefined;
+    const left = node.left.getText(file).replace(/\s/g, '');
+    const right = node.right.getText(file).replace(/\s/g, '');
+    const literal = left === 'import.meta.env.VITE_TARGET' && ts.isStringLiteral(node.right) ? node.right.text
+      : right === 'import.meta.env.VITE_TARGET' && ts.isStringLiteral(node.left) ? node.left.text : undefined;
+    return literal === undefined ? undefined : op === ts.SyntaxKind.EqualsEqualsEqualsToken ? target === literal : target !== literal;
+  };
+  const visit = (node: ts.Node) => {
+    if (ts.isConditionalExpression(node) || ts.isIfStatement(node)) {
+      const known = targetCondition(ts.isConditionalExpression(node) ? node.condition : node.expression);
+      if (known !== undefined) {
+        const branch = ts.isConditionalExpression(node) ? known ? node.whenTrue : node.whenFalse : known ? node.thenStatement : node.elseStatement;
+        if (branch) visit(branch);
+        return;
+      }
+    }
+    if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+      const clause = node.importClause;
+      const bindings = clause?.namedBindings;
+      const namedTypesOnly = bindings && ts.isNamedImports(bindings) && bindings.elements.length > 0 && bindings.elements.every((element) => element.isTypeOnly);
+      if (!clause?.isTypeOnly && !(namedTypesOnly && !clause?.name)) imports.push(node.moduleSpecifier.text);
+    } else if (ts.isExportDeclaration(node) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+      const clause = node.exportClause;
+      const namedTypesOnly = clause && ts.isNamedExports(clause) && clause.elements.length > 0 && clause.elements.every((element) => element.isTypeOnly);
+      if (!node.isTypeOnly && !namedTypesOnly) imports.push(node.moduleSpecifier.text);
+    } else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword && node.arguments[0] && ts.isStringLiteral(node.arguments[0])) {
+      imports.push(node.arguments[0].text);
+    } else if (ts.isImportEqualsDeclaration(node) && !node.isTypeOnly && ts.isExternalModuleReference(node.moduleReference) && node.moduleReference.expression && ts.isStringLiteral(node.moduleReference.expression)) {
+      imports.push(node.moduleReference.expression.text);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return imports;
+}
 function reach(entry: string): string[] {
   const seen = new Set<string>(); const stack = [join(SRC, entry)];
   while (stack.length) {
@@ -99,13 +141,40 @@ function reach(entry: string): string[] {
     // auth/desktopLogin is only reachable through `if (import.meta.env.VITE_TARGET === 'desktop')` branches (folded at build; see bundle greps in README)
     if (f.endsWith('auth/desktopLogin.ts')) continue;
     const src = readFileSync(f, 'utf8');
-    for (const m of src.matchAll(/(?:from|import\()\s*['"]([^'"]+)['"]/g)) { const r = resolve(f, m[1]!); if (r && !r.includes('.test.')) stack.push(r); }
+    for (const spec of runtimeImports(src, entry.startsWith('desktop/') ? 'desktop' : 'web')) { const r = resolve(f, spec); if (r && !r.includes('.test.')) stack.push(r); }
   }
   return [...seen].map((f) => f.slice(SRC.length + 1));
 }
 const has = (files: string[], ...frags: string[]) => files.filter((f) => frags.some((x) => f.includes(x)));
 
 describe('bundle boundaries (import graph)', () => {
+  it('traverses runtime imports and reexports while excluding erased type dependencies', () => {
+    expect(runtimeImports(`
+      import type { Mapping } from './types';
+      import { type State } from './state';
+      export type { Config } from './config';
+      export { type Row } from './rows';
+      import './side-effect';
+      import Default, { type Metadata } from './default';
+      import { value, type Shape } from './mixed';
+      import * as namespace from './namespace';
+      export * from './exports';
+      export { value as alias, type Kind } from './mixed-exports';
+      const lazy = () => import('./lazy');
+      // import('./comment-only')
+      const text = "from './string-only'";
+    `)).toEqual(['./side-effect', './default', './mixed', './namespace', './exports', './mixed-exports', './lazy']);
+  });
+  it('folds explicit Vite target branches without excluding unconditional runtime imports', () => {
+    const source = `
+      import './always';
+      const panel = import.meta.env.VITE_TARGET === 'desktop' ? import('./desktop-panel') : import('./web-panel');
+      if (import.meta.env.VITE_TARGET === 'desktop') { import('./desktop-login'); }
+      else { import('./web-login'); }
+    `;
+    expect(runtimeImports(source, 'web')).toEqual(['./always', './web-panel', './web-login']);
+    expect(runtimeImports(source, 'desktop')).toEqual(['./always', './desktop-panel', './desktop-login']);
+  });
   it('web boot never reaches TableDB, gateway, Agent, Tauri bridge or desktop pages (the upload pipeline is shared)', () => {
     const g = reach('web/boot.ts');
     expect(has(g, 'features/tabledb', 'features/agent', 'gateway/', 'runtime/tauri', 'runtime/secretTokenStore', 'desktop/', 'Desktop', 'desktopSave')).toEqual([]);

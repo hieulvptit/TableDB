@@ -1,3 +1,4 @@
+import { dbRuntimeConfig } from './runtimeConfig';
 import { classifySql } from '@vnpay/shared';
 import { uid } from '../../lib';
 import { auditReporter, type AuditReporter } from './audit';
@@ -5,7 +6,7 @@ import { friendlyDbError, type FriendlyError } from './dbErrors';
 import type { Connection } from './types';
 
 export interface Grid { columns: string[]; rows: unknown[][]; truncated: boolean }
-const PAGE = 1000;
+
 
 const subject = (conn: Connection) => (conn.custom ? { custom: conn.custom } : { targetId: conn.targetId });
 
@@ -17,14 +18,14 @@ export async function runAudited(conn: Connection, sql: string, mode: 'read' | '
     audit.report({ ...subject(conn), mode, kind: classifySql(sql).kind, sql, ok, ms: Date.now() - started, ...extra });
   try {
     const r = await conn.api.execute({
-      queryId: uid(), sql, mode, ...(mode === 'write' ? { confirmWrite: true } : {}), maxRows: opts.maxRows ?? 1000, timeoutSec: opts.timeoutSec ?? 120, pageSize: PAGE,
+      queryId: uid(), sql, mode, ...(mode === 'write' ? { confirmWrite: true } : {}), maxRows: opts.maxRows ?? dbRuntimeConfig().defaultMaxRows, timeoutSec: opts.timeoutSec ?? dbRuntimeConfig().defaultTimeoutSec, pageSize: dbRuntimeConfig().pageSize,
       ...(opts.lobLimit ? { lobLimit: opts.lobLimit } : {}),
     });
     const rows: unknown[][] = [];
     for (const x of r.rows ?? []) rows.push(x);
     let hasMore = r.hasMore, truncated = r.truncated;
     while (opts.all && hasMore && r.cursorId && !opts.cancelled?.()) {
-      const p = await conn.api.fetch(r.cursorId, PAGE);
+      const p = await conn.api.fetch(r.cursorId, dbRuntimeConfig().pageSize);
       for (const x of p.rows) rows.push(x);
       hasMore = p.hasMore; truncated = p.truncated;
     }

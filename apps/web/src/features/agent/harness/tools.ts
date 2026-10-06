@@ -48,14 +48,14 @@ export const writeTodosTool: ToolDef = {
 };
 
 /** OpenMetadata MCP tools, narrowed to the read-only allow-list; the call is made with the user's own token. */
-export function openMetadataTools(session: McpSession, listed: McpTool[]): ToolDef[] {
-  return listed.filter((t) => isReadonlyOM(t.name)).map((t) => {
+export function openMetadataTools(session: McpSession, listed: McpTool[], allowed?: string[]): ToolDef[] {
+  return listed.filter((t) => isReadonlyOM(t.name, allowed)).map((t) => {
     const schema = sanitizeField(t.inputSchema === undefined || t.inputSchema === null ? '{}' : JSON.stringify(t.inputSchema), 400).text;
     return {
       name: t.name,
       description: '[OpenMetadata, read-only] ' + sanitizeField(t.description ?? '', 300).text,
       args: schema,
-      run: (a) => session.callTool(t.name, a),
+      run: (a, c) => session.callTool(t.name, a, c.shared.signal),
     };
   });
 }

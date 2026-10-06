@@ -19,6 +19,6 @@ export const transfersApi = {
   get: (id: string) => apiClient.get<TicketDetail>(`/transfers/${encodeURIComponent(id)}`),
   list: async (view: TransferView, status?: string) => asList<TicketView>(await apiClient.get<unknown>('/transfers', { query: { view, status } }), 'tickets'),
   revoke: (id: string) => apiClient.post(`/transfers/${encodeURIComponent(id)}/revoke`),
-  /** one-time, 60 s; the server only issues it to the destination side of the ticket direction */
+  /** one-time, TTL configured by the server; the server only issues it to the destination side of the ticket direction */
   downloadToken: (id: string) => apiClient.post<{ url: string; expiresInSec: number }>(`/transfers/${encodeURIComponent(id)}/download-token`),
 };

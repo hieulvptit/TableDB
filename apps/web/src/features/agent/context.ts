@@ -1,3 +1,4 @@
+import { MAX_HISTORY_MESSAGES } from './memory';
 import type { AgentChatBody } from '@vnpay/shared';
 import type { Connection, AgentRowsAttachment, SelectedTable } from '../tabledb/types';
 import { tableKey, type TableRef } from '../tabledb/schemaStore';
@@ -51,7 +52,7 @@ export function buildPreviewBody(conn: Pick<Connection, 'id' | 'name' | 'driver'
 export function buildChatBody(
   conn: Pick<Connection, 'id' | 'name' | 'driver' | 'store'>, selected: SelectedTable[], expandRelated: boolean,
   messages: Array<{ role: 'user' | 'assistant'; content: string; images?: string[] }>, rows?: AgentRowsAttachment | null, llm?: AgentLlmChoice | null,
-  extra: { dataContext?: string; plain?: boolean } = {},
+  extra: Partial<Pick<AgentChatBody, 'dataContext' | 'plain' | 'personalSkills' | 'personalAgents' | 'agentName'>> = {},
 ): AgentChatBody {
-  return { ...buildPreviewBody(conn, selected, expandRelated, rows, llm), ...(extra.dataContext ? { dataContext: extra.dataContext.slice(0, 4000) } : {}), ...(extra.plain ? { plain: true } : {}), messages: messages.slice(-30).map((m) => ({ role: m.role, content: m.content.slice(0, 8000), ...(m.images?.length ? { images: m.images } : {}) })) };
+  return { ...buildPreviewBody(conn, selected, expandRelated, rows, llm), ...(extra.dataContext ? { dataContext: extra.dataContext.slice(0, 4000) } : {}), ...(extra.plain ? { plain: true } : {}), ...(extra.personalSkills ? { personalSkills: extra.personalSkills } : {}), ...(extra.personalAgents ? { personalAgents: extra.personalAgents } : {}), ...(extra.agentName ? { agentName: extra.agentName } : {}), messages: messages.slice(-MAX_HISTORY_MESSAGES).map((m) => ({ role: m.role, content: m.content.slice(0, 8000), ...(m.images?.length ? { images: m.images } : {}) })) };
 }

@@ -1,11 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatMsg, MemoryNote } from '../tabledb/workspace';
 import { buildHistory, KEEP_RECENT, pendingSummary, preamble, summaryRequest, titleFrom, SUMMARIZE_AFTER } from './memory';
+import { buildChatBody } from './context';
+import { SchemaStore } from '../tabledb/schemaStore';
+import type { DbApi } from '../../gateway';
 
 const mk = (n: number): ChatMsg[] => Array.from({ length: n }, (_, i) => ({ role: i % 2 === 0 ? 'user' : 'assistant', content: `m${i}`, at: i }));
 const note = (text: string, enabled = true): MemoryNote => ({ id: text, text, at: 0, enabled });
 
 describe('buildHistory', () => {
+  it('preserves memory and summary through the wire limit when summarization falls behind', () => {
+    const conn = { id: 'c', name: 'n', driver: 'postgresql' as const, store: new SchemaStore({} as DbApi) };
+    const history = buildHistory(mk(37), [note('KEEP_MEMORY')], 'KEEP_SUMMARY');
+    const wire = buildChatBody(conn, [], false, history).messages;
+    expect(wire[0]!.role).toBe('user');
+    expect(wire[0]!.content).toContain('KEEP_MEMORY');
+    expect(wire[0]!.content).toContain('KEEP_SUMMARY');
+    expect(wire.at(-1)!.content).toBe('m36');
+  });
   it('sends only the messages after the summarized prefix, starting on a user turn', () => {
     const h = buildHistory(mk(31), [], 'sum', 19);
     expect(h.length).toBeLessThanOrEqual(KEEP_RECENT);

@@ -1,4 +1,4 @@
-name: Desktop builds
+name: Desktop and service builds
 
 on:
   workflow_dispatch:
@@ -11,6 +11,8 @@ on:
     branches: [main]
     tags: ['desktop-v*']
     paths:
+      - 'services/api/**'
+      - 'services/web/**'
       - 'apps/desktop/**'
       - 'apps/web/**'
       - 'packages/**'
@@ -22,6 +24,8 @@ on:
       - '.github/scripts/desktop-ci.py'
   pull_request:
     paths:
+      - 'services/api/**'
+      - 'services/web/**'
       - 'apps/desktop/**'
       - 'apps/web/**'
       - 'packages/**'
@@ -40,6 +44,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  TABLEDB_SERVER_SIGNING_PUBLIC_KEY: ${{ vars.TABLEDB_SERVER_SIGNING_PUBLIC_KEY }}
+  VITE_SECURE_WEB_PUBLIC_KEY: ${{ vars.VITE_SECURE_WEB_PUBLIC_KEY }}
   API_ORIGIN: ${{ inputs.api_origin || vars.TABLEDB_API_ORIGIN || 'http://10.23.5.40:8484' }}
 
 jobs:
@@ -110,6 +116,124 @@ jobs:
           target: ${{ matrix.target }}
           bundles: ${{ matrix.bundles }}
           artifact: ${{ matrix.artifact }}
+
+  release:
+    name: Publish desktop and services release
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'desktop-v') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: [native, linux, api, web-bo]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tabledb-*
+          path: desktop-artifacts
+          merge-multiple: false
+      - name: Verify and prepare release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          for platform in windows-x64 macos-arm64 macos-x64 ubuntu-x64 debian-x64 api-linux-x64 api-windows-x64 web-bo; do
+            artifact="tabledb-$platform"
+            directory="desktop-artifacts/$artifact"
+            (cd "$directory" && sha256sum --check SHA256SUMS.txt)
+            for file in "$directory"/*; do
+              [[ "$(basename "$file")" == SHA256SUMS.txt ]] && continue
+              cp "$file" "release-assets/$artifact-$(basename "$file")"
+            done
+          done
+          (cd release-assets && sha256sum -- * > SHA256SUMS.txt)
+      - name: Create release and upload packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-assets/* --clobber
+          else
+            gh release create "$RELEASE_TAG" release-assets/* \
+              --verify-tag --title "$RELEASE_TAG" --generate-notes
+          fi
+
+  api:
+    name: API service (${{ matrix.os }} x64)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            executable: tabledb-api
+          - os: windows
+            executable: tabledb-api.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: services/api/go.mod
+          cache-dependency-path: services/api/go.sum
+      - name: Build API service
+        working-directory: services/api
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.os }}
+          GOARCH: amd64
+          API_EXECUTABLE: ${{ matrix.executable }}
+        run: go build -trimpath -ldflags='-s -w' -o "../../service-package/$API_EXECUTABLE" ./cmd/server
+      - name: Package API and deployment documentation
+        env:
+          API_OS: ${{ matrix.os }}
+        run: |
+          set -euo pipefail
+          mkdir -p service-artifacts
+          cp services/api/README.md service-package/README.md
+          cp docs/SECURE-TRANSPORT.md service-package/SECURE-TRANSPORT.md
+          cp docs/OPERATIONS.md service-package/OPERATIONS.md
+          git rev-parse HEAD > service-package/COMMIT.txt
+          tar -czf "service-artifacts/api-$API_OS-x64.tar.gz" -C service-package .
+          (cd service-artifacts && sha256sum -- *.tar.gz > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tabledb-api-${{ matrix.os }}-x64
+          path: service-artifacts/
+          if-no-files-found: error
+          retention-days: 30
+
+  web-bo:
+    name: Web BO package
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run build --workspace @vnpay/web-bo
+      - name: Package web BO
+        run: |
+          set -euo pipefail
+          mkdir -p web-bo-package web-bo-artifacts
+          cp -R services/web/dist web-bo-package/dist
+          cp services/web/README.md web-bo-package/README.md
+          cp docs/SECURE-TRANSPORT.md web-bo-package/SECURE-TRANSPORT.md
+          git rev-parse HEAD > web-bo-package/COMMIT.txt
+          tar -czf web-bo-artifacts/web-bo.tar.gz -C web-bo-package .
+          (cd web-bo-artifacts && sha256sum -- *.tar.gz > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tabledb-web-bo
+          path: web-bo-artifacts/
+          if-no-files-found: error
+          retention-days: 30
 
   linux:
     name: ${{ matrix.name }}

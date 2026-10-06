@@ -32,7 +32,7 @@ describe('TauriGateway', () => {
     await gw.rpc('s1', 'meta.tables', { schema: 'a' });
     await gw.rpc('s1', 'query.fetch', { cursorId: 'c1' });
     expect(calls[0]).toEqual(['meta.tables', { sessionId: 's1', schema: 'a' }]);
-    expect(calls[1]).toEqual(['query.fetch', { cursorId: 'c1' }]);
+    expect(calls[1]).toEqual(['query.fetch', { cursorId: 'c1', count: 500 }]);
   });
 
   it('cancel uses sidecar_cancel', async () => {

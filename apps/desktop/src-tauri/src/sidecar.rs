@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -295,11 +295,13 @@ pub fn browser_url_for_event(ev: &SidecarEvent) -> Option<url::Url> {
 
 struct Running {
     generation: u64,
+    accepting: bool,
     stdin: Arc<Mutex<ChildStdin>>,
     kill: Arc<Notify>,
 }
 
 pub struct SidecarManager {
+    heap_mb: AtomicU32,
     spec: Result<LaunchSpec, AppError>,
     sink: Arc<dyn EventSink>,
     running: Mutex<Option<Running>>,
@@ -313,6 +315,7 @@ pub struct SidecarManager {
 impl SidecarManager {
     pub fn new(spec: Result<LaunchSpec, AppError>, sink: Arc<dyn EventSink>) -> Arc<Self> {
         Arc::new(Self {
+            heap_mb: AtomicU32::new(0),
             spec,
             sink,
             running: Mutex::new(None),
@@ -323,6 +326,8 @@ impl SidecarManager {
             ready: StdMutex::new(None),
         })
     }
+
+    pub fn set_heap_mb(&self, mb: u32) { self.heap_mb.store(mb, Ordering::SeqCst); }
 
     pub fn ready_info(&self) -> Option<Value> {
         self.ready.lock().unwrap().clone()
@@ -359,7 +364,9 @@ impl SidecarManager {
         if self.shutting_down.load(Ordering::SeqCst) {
             return Err(AppError::new("E_SIDECAR_EXITED", "application is shutting down"));
         }
-        let stdin = self.ensure_running().await?;
+        let deadline = tokio::time::Instant::now() + timeout;
+        let stdin = tokio::time::timeout_at(deadline, self.ensure_running()).await
+            .map_err(|_| AppError::new("E_TIMEOUT", "timed out starting sidecar").retryable(true))??;
         let (id, rx) = self.correlator.lock().unwrap().register();
         let line = match encode_request(id, method, &params) {
             Ok(l) => l,
@@ -370,25 +377,43 @@ impl SidecarManager {
         };
         let write = async {
             let mut w = stdin.lock().await;
+            if !self.running.lock().await.as_ref().is_some_and(|r| r.accepting && Arc::ptr_eq(&r.stdin, &stdin)) {
+                return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "sidecar transport invalidated"));
+            }
             w.write_all(&line).await?;
             w.flush().await
         };
-        if write.await.is_err() {
-            self.correlator.lock().unwrap().forget(id);
-            return Err(AppError::new("E_SIDECAR_EXITED", "sidecar is not accepting requests").retryable(true));
+        match tokio::time::timeout_at(deadline, write).await {
+            Ok(Ok(())) => {}
+            result => {
+                self.correlator.lock().unwrap().forget(id);
+                // A failed/cancelled write may have emitted a partial NDJSON frame. Kill this
+                // generation before accepting any further writes on the same pipe.
+                let mut running = self.running.lock().await;
+                if let Some(r) = running.as_mut().filter(|r| Arc::ptr_eq(&r.stdin, &stdin)) {
+                    r.accepting = false;
+                    r.kill.notify_one();
+                }
+                return Err(if result.is_err() {
+                    AppError::new("E_TIMEOUT", "timed out writing to sidecar").retryable(true)
+                } else {
+                    AppError::new("E_SIDECAR_EXITED", "sidecar is not accepting requests").retryable(true)
+                });
+            }
         }
-        match tokio::time::timeout(timeout, rx).await {
+        match tokio::time::timeout_at(deadline, rx).await {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(_)) => Err(AppError::new("E_SIDECAR_EXITED", "sidecar exited before responding").retryable(true)),
             Err(_) => {
                 self.correlator.lock().unwrap().forget(id);
-                if method == "query.execute" {
-                    if let Some(q) = params.get("queryId").and_then(Value::as_str) {
+                if matches!(method, "query.execute" | "query.fetch") {
+                    let key = if method == "query.fetch" { "cursorId" } else { "queryId" };
+                    if let Some(q) = params.get(key).and_then(Value::as_str) {
                         // best effort: ask the sidecar to cancel the statement that we stopped waiting for
                         let me = self.clone();
                         let q = q.to_string();
                         tokio::spawn(async move {
-                            me.fire_and_forget("query.cancel", json!({"queryId": q})).await;
+                            me.fire_and_forget("query.cancel", json!({(key): q})).await;
                         });
                     }
                 }
@@ -400,19 +425,34 @@ impl SidecarManager {
     /// Send without waiting for the response (the reply is matched and dropped).
     /// Not recursive on `request_with_timeout`, so it is usable from spawned tasks.
     async fn fire_and_forget(self: &Arc<Self>, method: &str, params: Value) {
-        let Ok(stdin) = self.ensure_running().await else { return };
+        let stdin = {
+            let running = self.running.lock().await;
+            let Some(r) = running.as_ref().filter(|r| r.accepting) else { return };
+            r.stdin.clone()
+        };
         let (id, rx) = self.correlator.lock().unwrap().register();
         drop(rx);
         if let Ok(line) = encode_request(id, method, &params) {
-            let mut w = stdin.lock().await;
-            let _ = w.write_all(&line).await;
-            let _ = w.flush().await;
+            let write = async {
+                let mut w = stdin.lock().await;
+                if !self.running.lock().await.as_ref().is_some_and(|r| r.accepting && Arc::ptr_eq(&r.stdin, &stdin)) {
+                    return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "sidecar transport invalidated"));
+                }
+                w.write_all(&line).await?;
+                w.flush().await
+            };
+            if !matches!(tokio::time::timeout(Duration::from_secs(5), write).await, Ok(Ok(()))) {
+                let mut running = self.running.lock().await;
+                if let Some(r) = running.as_mut().filter(|r| Arc::ptr_eq(&r.stdin, &stdin)) { r.accepting = false; r.kill.notify_one(); }
+            }
         }
+        self.correlator.lock().unwrap().forget(id);
     }
 
     async fn ensure_running(self: &Arc<Self>) -> Result<Arc<Mutex<ChildStdin>>, AppError> {
         let mut guard = self.running.lock().await;
         if let Some(r) = guard.as_ref() {
+            if !r.accepting { return Err(AppError::new("E_SIDECAR_EXITED", "sidecar transport is restarting").retryable(true)); }
             return Ok(r.stdin.clone());
         }
         let spec = self.spec.as_ref().map_err(Clone::clone)?;
@@ -424,7 +464,9 @@ impl SidecarManager {
             .retryable(true));
         }
         let mut cmd = Command::new(&spec.program);
-        cmd.args(&spec.args)
+        let mb = self.heap_mb.load(Ordering::SeqCst);
+        let args: Vec<String> = spec.args.iter().map(|a| if mb > 0 && a.starts_with("-Xmx") { format!("-Xmx{mb}m") } else { a.clone() }).collect();
+        cmd.args(&args)
             .env_remove("JDBC_SERVICE_TOKEN")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -451,7 +493,7 @@ impl SidecarManager {
         tokio::spawn(supervise(self.clone(), child, generation, kill.clone()));
 
         let stdin = Arc::new(Mutex::new(stdin));
-        *guard = Some(Running { generation, stdin: stdin.clone(), kill });
+        *guard = Some(Running { generation, accepting: true, stdin: stdin.clone(), kill });
         Ok(stdin)
     }
 
@@ -535,15 +577,15 @@ async fn supervise(mgr: Arc<SidecarManager>, mut child: Child, generation: u64, 
         }
     };
     let expected = mgr.shutting_down.load(Ordering::SeqCst);
-    {
+    let n = {
         let mut running = mgr.running.lock().await;
-        if running.as_ref().map(|r| r.generation) == Some(generation) {
-            *running = None;
-        }
-    }
-    let n = mgr.correlator.lock().unwrap().fail_all(&AppError::new("E_SIDECAR_EXITED", "sidecar exited unexpectedly").retryable(true));
+        // Fail the old generation before making a successor spawnable.
+        let n = mgr.correlator.lock().unwrap().fail_all(&AppError::new("E_SIDECAR_EXITED", "sidecar exited unexpectedly").retryable(true));
+        if !expected { mgr.policy.lock().unwrap().record_exit(Instant::now()); }
+        if running.as_ref().map(|r| r.generation) == Some(generation) { *running = None; }
+        n
+    };
     if !expected {
-        mgr.policy.lock().unwrap().record_exit(Instant::now());
         log::warn!("sidecar generation {generation} exited ({status:?}); {n} request(s) failed; will restart on next request");
         mgr.sink.emit(&SidecarEvent { event: "exit".into(), seq: 0, data: json!({"code": status.and_then(|s| s.code())}) });
     }
@@ -770,6 +812,39 @@ done"#;
             let m = SidecarManager::new(sh(ECHO), Arc::new(Collect::default()));
             let e = m.request_with_timeout("hello", json!({"slow": true}), Duration::from_millis(300)).await.unwrap_err();
             assert_eq!(e.code, "E_TIMEOUT");
+            m.shutdown().await;
+        }
+
+        #[tokio::test]
+        async fn fetch_timeout_sends_cursor_cancellation() {
+            let sink = Arc::new(Collect::default());
+            let script = r#"while IFS= read -r line; do
+case "$line" in *query.cancel*cursorId*fetch-1*) echo '{"event":"cancel-observed","seq":1,"data":{}}';; esac
+done"#;
+            let m = SidecarManager::new(sh(script), sink.clone());
+            assert_eq!(m.request_with_timeout("query.fetch", json!({"cursorId": "fetch-1"}), Duration::from_millis(50)).await.unwrap_err().code, "E_TIMEOUT");
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if sink.0.lock().unwrap().iter().any(|e| e.event == "cancel-observed") { break; }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.unwrap();
+            m.shutdown().await;
+        }
+
+        #[tokio::test]
+        async fn blocked_stdin_obeys_deadline_and_kills_generation() {
+            let m = SidecarManager::new(sh("exec sleep 30"), Arc::new(Collect::default()));
+            let result = tokio::time::timeout(Duration::from_secs(3),
+                m.request_with_timeout("hello", json!({"payload": "x".repeat(1024 * 1024)}), Duration::from_millis(150))).await;
+            assert_eq!(result.unwrap().unwrap_err().code, "E_TIMEOUT");
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if m.running.lock().await.is_none() { break; }
+                    tokio::task::yield_now().await;
+                }
+            }).await.unwrap();
+            assert_eq!(m.correlator.lock().unwrap().len(), 0);
             m.shutdown().await;
         }
 

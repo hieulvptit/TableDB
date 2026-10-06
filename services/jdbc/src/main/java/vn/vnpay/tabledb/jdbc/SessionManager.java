@@ -60,9 +60,11 @@ public final class SessionManager implements AutoCloseable {
     public boolean close(String id) {
         Session s = sessions.remove(id);
         if (s == null) return false;
-        for (String cid : s.cursors.keySet()) cursors.remove(cid);
         s.lock.lock();
-        try { s.close(); } finally { s.lock.unlock(); }
+        try {
+            for (String cid : s.cursors.keySet()) cursors.remove(cid);
+            s.close();
+        } finally { s.lock.unlock(); }
         return true;
     }
 
@@ -102,16 +104,17 @@ public final class SessionManager implements AutoCloseable {
         long idle = TimeUnit.SECONDS.toNanos(cfg.idleTimeoutSec());
         long cidle = TimeUnit.SECONDS.toNanos(cfg.cursorIdleSec());
         for (Session s : sessions.values()) {
-            if (s.active.get() == 0 && nowNanos - s.lastUsed > idle) {
-                Log.info("closing idle session");
-                close(s.id);
-                continue;
-            }
-            for (Cursor c : s.cursors.values()) {
-                if (nowNanos - c.lastUsed > cidle && s.lock.tryLock()) {
-                    try { c.close(); cursors.remove(c.id); } finally { s.lock.unlock(); }
+            if (!s.lock.tryLock()) continue;
+            try {
+                if (s.active.get() == 0 && nowNanos - s.lastUsed > idle) {
+                    Log.info("closing idle session");
+                    close(s.id);
+                    continue;
                 }
-            }
+                for (Cursor c : s.cursors.values()) {
+                    if (nowNanos - c.lastUsed > cidle) { c.close(); cursors.remove(c.id); }
+                }
+            } finally { s.lock.unlock(); }
         }
         cursors.values().removeIf(Cursor::isClosed);
     }

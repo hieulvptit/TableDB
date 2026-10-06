@@ -1,0 +1,1 @@
+export const TEST_DB_CONFIG = { defaultMaxRows: 1000, maxRows: 100000, defaultTimeoutSec: 60, maxTimeoutSec: 600, pageSize: 500, tablePageSize: 200, connectTimeoutSec: 15, externalAuthTimeoutSec: 180 };

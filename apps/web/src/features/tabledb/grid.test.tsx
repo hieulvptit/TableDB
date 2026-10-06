@@ -1,3 +1,5 @@
+import { auditReporter } from './audit';
+import * as downloads from './csv';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
@@ -122,5 +124,17 @@ describe('result grid', () => {
     await user.click(screen.getByRole('button', { name: 'Xuất kết quả…' }));
     expect(screen.getByRole('dialog', { name: 'Xuất kết quả…' })).toBeInTheDocument();
     expect(screen.getByLabelText('Định dạng')).toHaveTextContent('Excel (.xlsx)');
+    const report = vi.spyOn(auditReporter, 'report').mockImplementation(() => {});
+    const download = vi.spyOn(downloads, 'downloadText').mockImplementation(() => {});
+    try {
+      await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Xuất' }));
+      expect(report).toHaveBeenCalledWith(expect.objectContaining({ event: 'export', targetId: 't1', format: 'csv', scope: 'view', rows: 2, ok: true, sql: 'SELECT id, status FROM t' }));
+      expect(report.mock.calls[0]![0]).not.toHaveProperty('data');
+      report.mockClear();
+      download.mockImplementation(() => { throw new Error('disk unavailable'); });
+      await user.click(screen.getByRole('button', { name: 'Xuất kết quả…' }));
+      await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Xuất' }));
+      expect(report).toHaveBeenCalledWith(expect.objectContaining({ event: 'export', ok: false, format: 'csv' }));
+    } finally { report.mockRestore(); download.mockRestore(); }
   });
 });

@@ -7,7 +7,7 @@ import { TableTools, type InfoTab, type ToolRequest } from './TableTools';
 import { callTemplate, listObjects, objectKinds, type DbObject, type ObjectKind } from './objects';
 import { ErDialog, SourceDialog } from './ObjectTools';
 import { qualified, quoteIdent, selectStarSql } from './tableSql';
-import { useTableDb } from './store';
+import { useTableDbSelector, type TableDbApi } from './store';
 import type { Connection } from './types';
 
 type Meta = { kind: 'catalog'; catalog: string } | { kind: 'schema'; catalog?: string; schema: string } | { kind: 'table'; ref: TableRef; type: string } | { kind: 'column' }
@@ -24,6 +24,8 @@ export function useStoreVersion(c: Connection | null) {
 }
 const noopSub = () => () => {};
 const zero = () => 0;
+const treeState = (db: TableDbApi) => ({ connections: db.connections, selected: db.selected, setSelected: db.setSelected, setActiveConn: db.setActiveConn, openTable: db.openTable, insertSql: db.insertSql, newTab: db.newTab, setSchema: db.setSchema });
+const insertState = (db: TableDbApi) => ({ insertSql: db.insertSql });
 
 /** true when any already-loaded schema/table name of this connection contains `q` (lower-case) */
 export function storeHasMatch(store: Connection['store'], q: string): boolean {
@@ -34,7 +36,7 @@ export function storeHasMatch(store: Connection['store'], q: string): boolean {
 }
 
 export function SchemaTree({ conn, embedded = false, filter = '' }: { conn: Connection; embedded?: boolean; filter?: string }) {
-  const db = useTableDb();
+  const db = useTableDbSelector(treeState);
   const toast = useToast();
   useStoreVersion(conn);
   const store = conn.store;
@@ -259,7 +261,7 @@ export function SchemaTree({ conn, embedded = false, filter = '' }: { conn: Conn
 }
 
 function TableDetails({ conn, tableRef }: { conn: Connection; tableRef: TableRef }) {
-  const db = useTableDb();
+  const db = useTableDbSelector(insertState);
   useStoreVersion(conn);
   const store = conn.store;
   const cols = store.columns(tableRef);

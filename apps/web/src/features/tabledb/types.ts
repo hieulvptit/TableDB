@@ -116,6 +116,9 @@ export interface OutputState {
   chart?: ChartSpec;
 }
 
+/** Result views use presentation metadata independently of the live editor buffer. */
+export type ResultTabState = Pick<EditorTabState, 'id' | 'connId' | 'title' | 'outputs' | 'view' | 'kind' | 'orderBy' | 'table' | 'filter' | 'schema' | 'catalog' | 'maxRows'>;
+
 export type SelectedTable = TableRef;
 
 /** Rows the user explicitly chose (and confirmed) to attach to the next Agent message only. */

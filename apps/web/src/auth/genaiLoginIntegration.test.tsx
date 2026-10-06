@@ -52,16 +52,14 @@ describe('genai login end to end (jsdom)', () => {
       if (!online) throw new TypeError('Failed to fetch');
       return json({ providers: [], devLogin: false, desktopLoginUrl: 'https://genai.vnpay.vn/create-jwt-token' });
     });
-    expect(await screen.findByText(t('login.api.error'))).toBeInTheDocument();
     expect(await screen.findByRole('button', { name: `${t('login.proxy.retry')}: ${t('login.proxy.reachable')}` })).toBeEnabled();
-    expect(screen.getByText(t('login.api.address', { url: '/api/v1' }))).toBeInTheDocument();
+    expect(screen.queryByText(t('login.api.address', { url: '/api/v1' }))).toBeNull();
     fireEvent.click(screen.getByText(t('login.proxy.title')));
     expect(screen.getByLabelText(t('login.proxy.username'))).toBeEnabled();
     expect(screen.getByLabelText(t('login.proxy.password'))).toBeEnabled();
     expect(screen.queryByRole('button', { name: t('login.genai.button') })).toBeNull();
     online = true;
-    fireEvent.click(screen.getAllByRole('button', { name: t('common.retry') })[0]!);
-    expect(await screen.findByText(t('login.api.ready'))).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: t('common.retry') }));
     await waitFor(() => expect(screen.getByRole('button', { name: t('login.genai.button') })).toBeEnabled());
     expect(calls.filter(u => u.endsWith('/auth/config'))).toHaveLength(2);
   });

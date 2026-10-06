@@ -235,61 +235,71 @@ type PartResult struct {
 var hex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func (s *Service) PutPart(ctx context.Context, a *auth.Ctx, id string, n int, body []byte, claimedSha string) (*PartResult, error) {
-	t, err := loadTicket(ctx, s.DB, id, false)
-	if err != nil {
-		return nil, err
-	}
-	if t.RequesterID != a.Principal.ID {
-		return nil, apperr.NotFound("ticket not found")
-	}
-	if t.Status != shared.StatusUploading {
-		return nil, apperr.Conflict("ticket is " + string(t.Status))
-	}
-	if n < 1 || n > t.TotalParts {
-		return nil, apperr.Validation("part number out of range")
-	}
-	expected := int64(t.PartBytes)
-	if n >= t.TotalParts {
-		expected = t.Size - int64(t.PartBytes)*int64(t.TotalParts-1)
-	}
-	if int64(len(body)) != expected {
-		return nil, apperr.Validation(fmt.Sprintf("part %d must be %d bytes", n, expected))
-	}
-	actual := sha256Hex(body)
-	if !hex64.MatchString(claimedSha) || actual != claimedSha {
-		return nil, apperr.Validation("part checksum mismatch")
-	}
-	var existing string
-	err = s.DB.QueryRow(ctx, "SELECT sha256 FROM upload_parts WHERE ticket_id=$1 AND n=$2", id, n).Scan(&existing)
-	if err == nil {
-		if existing == actual {
-			return &PartResult{N: n, Duplicate: true}, nil
+	// The ticket row is the cross-process publication lock. It also coordinates
+	// uploads with completion/abort: publish ciphertext and metadata before release.
+	return db.Tx(ctx, s.DB, func(tx db.Runner) (*PartResult, error) {
+		t, err := loadTicket(ctx, tx, id, true)
+		if err != nil {
+			return nil, err
 		}
-		return nil, apperr.Conflict("part already uploaded with different content")
-	} else if !db.IsNoRows(err) {
-		return nil, err
-	}
-	if err := s.admit(int64(len(body))); err != nil {
-		return nil, err
-	}
-	dek, err := s.Keys.Unwrap(t.DekWrapped)
-	if err != nil {
-		return nil, err
-	}
-	ct, err := crypto.SealBuffer(dek, body, partAAD(id, n))
-	if err != nil {
-		return nil, err
-	}
-	if err := s.Store.Put(partKey(id, n), ct); err != nil {
-		return nil, err
-	}
-	if _, err := s.DB.Exec(ctx, "INSERT INTO upload_parts (ticket_id, n, size, sha256, storage_key) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", id, n, len(body), actual, partKey(id, n)); err != nil {
-		return nil, err
-	}
-	if tag, err := s.DB.Exec(ctx, "UPDATE tickets SET upload_started_at=now() WHERE id=$1 AND upload_started_at IS NULL", id); err == nil && tag.RowsAffected() == 1 {
-		_ = s.audT(ctx, s.DB, a, "transfer.upload_started", t, "", map[string]any{"partBytes": t.PartBytes, "totalParts": t.TotalParts})
-	}
-	return &PartResult{N: n}, nil
+		if t.RequesterID != a.Principal.ID {
+			return nil, apperr.NotFound("ticket not found")
+		}
+		if t.Status != shared.StatusUploading {
+			return nil, apperr.Conflict("ticket is " + string(t.Status))
+		}
+		if n < 1 || n > t.TotalParts {
+			return nil, apperr.Validation("part number out of range")
+		}
+		expected := int64(t.PartBytes)
+		if n >= t.TotalParts {
+			expected = t.Size - int64(t.PartBytes)*int64(t.TotalParts-1)
+		}
+		if int64(len(body)) != expected {
+			return nil, apperr.Validation(fmt.Sprintf("part %d must be %d bytes", n, expected))
+		}
+		actual := sha256Hex(body)
+		if !hex64.MatchString(claimedSha) || actual != claimedSha {
+			return nil, apperr.Validation("part checksum mismatch")
+		}
+		var existing string
+		err = tx.QueryRow(ctx, "SELECT sha256 FROM upload_parts WHERE ticket_id=$1 AND n=$2", id, n).Scan(&existing)
+		if err == nil {
+			if existing == actual {
+				return &PartResult{N: n, Duplicate: true}, nil
+			}
+			return nil, apperr.Conflict("part already uploaded with different content")
+		} else if !db.IsNoRows(err) {
+			return nil, err
+		}
+		if err := s.admit(int64(len(body))); err != nil {
+			return nil, err
+		}
+		dek, err := s.Keys.Unwrap(t.DekWrapped)
+		if err != nil {
+			return nil, err
+		}
+		ct, err := crypto.SealBuffer(dek, body, partAAD(id, n))
+		if err != nil {
+			return nil, err
+		}
+		if err := s.Store.Put(partKey(id, n), ct); err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(ctx, "INSERT INTO upload_parts (ticket_id, n, size, sha256, storage_key) VALUES ($1,$2,$3,$4,$5)", id, n, len(body), actual, partKey(id, n)); err != nil {
+			return nil, err
+		}
+		tag, err := tx.Exec(ctx, "UPDATE tickets SET upload_started_at=now() WHERE id=$1 AND upload_started_at IS NULL", id)
+		if err != nil {
+			return nil, err
+		}
+		if tag.RowsAffected() == 1 {
+			if err := s.audT(ctx, tx, a, "transfer.upload_started", t, "", map[string]any{"partBytes": t.PartBytes, "totalParts": t.TotalParts}); err != nil {
+				return nil, err
+			}
+		}
+		return &PartResult{N: n}, nil
+	})
 }
 
 func (s *Service) receivedParts(ctx context.Context, q db.Querier, id string) ([]int, error) {
@@ -615,14 +625,14 @@ func (s *Service) IssueDownloadToken(ctx context.Context, a *auth.Ctx, id, ip st
 		return "", 0, apperr.New(apperr.StepupRequired, "please sign in again to download")
 	}
 	token = crypto.RandomToken(32)
-	if _, err := s.DB.Exec(ctx, "INSERT INTO download_tokens (token_hash, ticket_id, user_id, expires_at) VALUES ($1,$2,$3, now() + interval '60 seconds')", crypto.Sha256HexString(token), id, a.Principal.ID); err != nil {
+	if _, err := s.DB.Exec(ctx, "INSERT INTO download_tokens (token_hash, ticket_id, user_id, expires_at) VALUES ($1,$2,$3, now() + $4 * interval '1 second')", crypto.Sha256HexString(token), id, a.Principal.ID, s.Cfg.DownloadTokenTTLSec); err != nil {
 		return "", 0, err
 	}
-	if err := s.audT(ctx, s.DB, a, "transfer.download_token", t, ip, map[string]any{"tokenTtlSec": 60, "downloadCount": t.DownloadCount, "remainingDownloads": downloadsLeft(t),
+	if err := s.audT(ctx, s.DB, a, "transfer.download_token", t, ip, map[string]any{"tokenTtlSec": s.Cfg.DownloadTokenTTLSec, "downloadCount": t.DownloadCount, "remainingDownloads": downloadsLeft(t),
 		"requestedBy": s.person(ctx, s.DB, a.Principal.ID), "client": string(a.Kind)}); err != nil {
 		return "", 0, err
 	}
-	return token, 60, nil
+	return token, s.Cfg.DownloadTokenTTLSec, nil
 }
 
 type Download struct {

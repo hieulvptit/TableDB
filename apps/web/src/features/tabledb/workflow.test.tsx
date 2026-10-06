@@ -218,3 +218,15 @@ describe('tab persistence', () => {
     expect(h.db.tabs.find((x) => x.id === id)!.profileId).toBe('keep');
   });
 });
+
+it('audits table activation and query with catalog/schema/table context', async () => {
+  const h = harness();
+  act(() => h.db.openTable({ catalog: 'app', schema: 'public', name: 'orders' }));
+  await flush();
+  expect(h.audit.report).toHaveBeenCalledWith(expect.objectContaining({ event: 'table_view', targetId: 't1', catalog: 'app', schema: 'public', table: 'orders', ok: true }));
+  expect(h.audit.report).toHaveBeenCalledWith(expect.objectContaining({ mode: 'read', catalog: 'app', schema: 'public', table: 'orders', ok: true }));
+  h.audit.report.mockClear();
+  act(() => h.db.openTable({ catalog: 'app', schema: 'public', name: 'orders' }));
+  expect(h.audit.report).toHaveBeenCalledOnce();
+  expect(h.audit.report).toHaveBeenCalledWith(expect.objectContaining({ event: 'table_view' }));
+});

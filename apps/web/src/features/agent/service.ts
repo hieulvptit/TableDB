@@ -1,11 +1,12 @@
-// The Agent, fully local (desktop). Everything the server used to do for /agent/* happens here: settings come from the local
-// config.json (via Rust), tokens live in the OS credential store (write-only from the webview), the LLM / OpenMetadata
-// calls go through the Rust HTTP bridge, and the tool loop runs in the harness. Only a metadata-only audit record leaves the machine.
+import type { AgentRuntimeConfig } from './runtimeConfig';
+// The Agent, fully local (desktop). Everything the server used to do for /agent/* happens here: settings come from the API server
+// (validated and cached by Rust), tokens live in the OS credential store (write-only from the webview), the LLM / OpenMetadata
+// calls go through the Rust HTTP bridge, and the tool loop runs in the harness. The server also receives the audit record.
 import { AgentChatBody, attachRows, buildAgentContext, classifySql, maskSql, redactText, type BuiltContext, type ContextManifest } from '@vnpay/shared';
 import { ApiError } from '../../api/errors';
 import type { AgentChatResult, AgentSettings, AgentSqlBlock, AgentTokenState, OpenMetadataTokenState } from '../../api/types';
 import { tauriAgentHttp, type AgentHttp } from './harness/bridge';
-import { sanitizeBlock, type ChatMsg, type ContextProposal, type TraceEvent } from './harness/harness';
+import { sanitizeBlock, withDeadline, type ChatMsg, type ContextProposal, type TraceEvent } from './harness/harness';
 import { LlmProvider, type LlmEndpoint } from './harness/llm';
 import { allowedOMTools, openMcp } from './harness/openmetadata';
 import { runAgent, type OMSession } from './harness/orchestrator';
@@ -14,13 +15,15 @@ import type { PreviewBody } from './context';
 export const HARD_BUDGET = 30_000;
 export const DEFAULT_BUDGET = 12_000;
 
-/** What Rust returns from the local config.json `agent` section. */
+/** Validated server deployment settings returned by Rust. */
 export interface AgentConfig {
+  runtime: AgentRuntimeConfig;
   endpoints: LlmEndpoint[];
   defaultEndpointId: string | null;
   defaultModel: string | null;
   budgetChars: number;
   openMetadataEnabled: boolean;
+  openMetadataRevision?: string;
 }
 
 export interface SecretStore {
@@ -65,10 +68,9 @@ const readJson = <T>(s: string | null): T | null => { if (!s) return null; try {
 
 export class AgentService {
   private http: AgentHttp;
-  private llm: LlmProvider;
+  private omCache: { key: string; expires: number; value: OMSession } | null = null;
   constructor(private d: AgentServiceDeps) {
     this.http = d.http ?? tauriAgentHttp;
-    this.llm = new LlmProvider(this.http);
   }
 
   private async cfg(): Promise<AgentConfig> {
@@ -76,8 +78,8 @@ export class AgentService {
     return { ...c, endpoints: c.endpoints ?? [], budgetChars: Math.min(HARD_BUDGET, Math.max(1000, c.budgetChars || DEFAULT_BUDGET)) };
   }
 
-  private async endpointAndModel(endpointId: string, model: string): Promise<LlmEndpoint> {
-    const ep = (await this.cfg()).endpoints.find((e) => e.id === endpointId);
+  private async endpointAndModel(endpointId: string, model: string, config?: AgentConfig): Promise<LlmEndpoint> {
+    const ep = (config ?? await this.cfg()).endpoints.find((e) => e.id === endpointId);
     if (!ep) throw validation('unknown endpoint');
     if (!ep.models.includes(model)) throw validation('model not allowed for endpoint');
     return ep;
@@ -86,6 +88,7 @@ export class AgentService {
   async settings(): Promise<AgentSettings> {
     const c = await this.cfg();
     return {
+      runtime: c.runtime,
       endpoints: c.endpoints.map((e) => ({ id: e.id, label: e.label, models: e.models, ...(e.description ? { description: e.description } : {}) })),
       defaultEndpointId: c.defaultEndpointId ?? '', defaultModel: c.defaultModel ?? '', budgetChars: c.budgetChars, openMetadataEnabled: c.openMetadataEnabled,
     };
@@ -104,8 +107,9 @@ export class AgentService {
   async saveToken(b: { token: string; endpointId: string; model: string }): Promise<{ ok: boolean }> {
     const token = b.token.trim();
     if (token.length < 8 || token.length > 4000) throw validation('token must be 8-4000 characters');
-    const ep = await this.endpointAndModel(b.endpointId, b.model);
-    const v = await this.llm.verify(ep, b.model, token);
+    const cfg = await this.cfg();
+    const ep = await this.endpointAndModel(b.endpointId, b.model, cfg);
+    const v = await new LlmProvider(this.http, cfg.runtime.llm, cfg.runtime.llm.timeoutSec).verify(ep, b.model, token);
     if (!v.ok) throw validation('token verification failed: ' + (v.reason || 'rejected'));
     await this.d.secrets.set(KEYS.llmToken, token);
     await this.d.secrets.set(KEYS.llmMeta, JSON.stringify({ endpointId: b.endpointId, model: b.model, lastVerifiedAt: new Date().toISOString() } satisfies LlmMeta));
@@ -116,8 +120,9 @@ export class AgentService {
   async verify(): Promise<{ ok: boolean; reason?: string }> {
     const m = await this.llmMeta();
     if (!m) throw validation('no LLM token configured');
-    const ep = await this.endpointAndModel(m.endpointId, m.model);
-    const v = await this.llm.verify(ep, m.model);
+    const cfg = await this.cfg();
+    const ep = await this.endpointAndModel(m.endpointId, m.model, cfg);
+    const v = await new LlmProvider(this.http, cfg.runtime.llm, cfg.runtime.llm.timeoutSec).verify(ep, m.model);
     if (v.ok) await this.d.secrets.set(KEYS.llmMeta, JSON.stringify({ ...m, lastVerifiedAt: new Date().toISOString() }));
     return v;
   }
@@ -138,10 +143,12 @@ export class AgentService {
   async saveOmToken(token0: string): Promise<{ ok: boolean; tools: string[] }> {
     const token = token0.trim();
     if (token.length < 8 || token.length > 4000) throw validation('token must be 8-4000 characters');
-    if (!(await this.cfg()).openMetadataEnabled) throw validation('OpenMetadata is not configured (config.json agent.openMetadataUrl)');
-    const session = await openMcp(this.http, token);
-    const tools = allowedOMTools(await session.listTools());
+    const cfg = await this.cfg();
+    if (!cfg.openMetadataEnabled) throw validation('OpenMetadata is not configured on the server');
+    const session = await openMcp(this.http, token, undefined, cfg.runtime.openMetadata);
+    const tools = allowedOMTools(await session.listTools(), cfg.runtime.openMetadata.allowedTools);
     if (tools.length === 0) throw validation('OpenMetadata MCP exposes none of the supported read-only tools');
+    this.omCache = null;
     await this.d.secrets.set(KEYS.omToken, token);
     await this.d.secrets.set(KEYS.omMeta, JSON.stringify({ lastVerifiedAt: new Date().toISOString() } satisfies OmMeta));
     const names = tools.map((t) => t.name);
@@ -150,6 +157,7 @@ export class AgentService {
   }
 
   async deleteOmToken(): Promise<{ ok: boolean }> {
+    this.omCache = null;
     await this.d.secrets.delete(KEYS.omToken);
     await this.d.secrets.delete(KEYS.omMeta);
     this.d.audit?.({ action: 'agent.openmetadata.token.delete' });
@@ -175,7 +183,20 @@ export class AgentService {
   }
 
   /** Runs the whole chat locally. `onTrace` receives every live step. */
-  async chat(body: AgentChatBody, onTrace?: (e: TraceEvent) => void, signal?: AbortSignal): Promise<AgentChatResult> {
+  async chat(body: AgentChatBody, onTrace?: (e: TraceEvent) => void, signal?: AbortSignal, onText?: (text: string) => void): Promise<AgentChatResult> {
+    const started = Date.now();
+    const cfg = await this.cfg();
+    return withDeadline(cfg.runtime.harness.deadlineMs - (Date.now() - started), signal, (boundedSignal) => this.chatWithinDeadline(body, cfg, onTrace, boundedSignal, onText));
+  }
+
+  private async chatWithinDeadline(body: AgentChatBody, cfg: AgentConfig, onTrace?: (e: TraceEvent) => void, signal?: AbortSignal, onText?: (text: string) => void): Promise<AgentChatResult> {
+    const started = Date.now();
+    let firstTextMs: number | undefined;
+    let llmMs = 0, inputChars = 0;
+    const emitText = onText ? (text: string) => {
+      if (text && firstTextMs === undefined) firstTextMs = Date.now() - started;
+      onText(text);
+    } : undefined;
     const parsed = AgentChatBody.safeParse(body);
     if (!parsed.success) throw validation(parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '));
     const b = parsed.data;
@@ -188,35 +209,59 @@ export class AgentService {
     // the token is valid on every configured endpoint, so the popup may switch endpoint/model per message
     const endpointId = b.endpointId || meta.endpointId;
     const model = b.model || meta.model;
-    const ep = await this.endpointAndModel(endpointId, model);
-    const cfg = await this.cfg();
-    const llmChat = (ms: ChatMsg[], sig?: AbortSignal) => this.llm.chat(ep, model, ms, sig);
-    const audit = (detail: AgentAuditRecord) => this.d.audit?.({ action: 'agent.chat', connectionId: b.connectionId, ...detail });
+    const ep = await this.endpointAndModel(endpointId, model, cfg);
+    const llmChat = async (ms: ChatMsg[], sig?: AbortSignal, delta?: (text: string) => void) => {
+      inputChars += ms.reduce((n, m) => n + m.content.length, 0);
+      const t0 = Date.now();
+      try { return await new LlmProvider(this.http, cfg.runtime.llm, cfg.runtime.llm.timeoutSec).chat(ep, model, ms, sig, delta); }
+      finally { llmMs += Date.now() - t0; }
+    };
+    const audit = (detail: AgentAuditRecord) => this.d.audit?.({ action: 'agent.chat', connectionId: b.connectionId, ...detail, timing: { durationMs: Date.now() - started, llmMs, inputChars, ...(firstTextMs !== undefined ? { firstTextMs } : {}) } });
     const fail = (cause: unknown): never => { audit({ ok: false, endpointId: ep.id, model }); throw cause; };
 
     if (b.plain) { // conversation summaries: one call, no metadata, no tools
       const built = this.build({ ...b, accessible: [], selectedTables: [] }, false, cfg.budgetChars);
       let text: string;
       try { text = await llmChat([{ role: 'system', content: built.system }, ...messages], signal); } catch (e) { return fail(e); }
+      if (signal?.aborted) throw new Error('cancelled');
       audit({ ok: true, plain: true, endpointId: ep.id, model, replyChars: text.length });
       return { reply: text, sql: [], manifest: built.manifest, toolCalls: [], trace: [], proposals: [], ask: null };
     }
 
-    // OpenMetadata tools only if configured in config.json, the user stored a token and the server exposes allow-listed read-only tools;
+    // OpenMetadata tools only if configured on the server, the user stored a token and the server exposes allow-listed read-only tools;
     // any failure degrades to the harness without OpenMetadata.
     let om: OMSession | null = null;
-    const omConfigured = cfg.openMetadataEnabled && b.useOpenMetadata;
-    if (omConfigured && (await this.d.secrets.get(KEYS.omMeta))) {
+    const selectedAgent = b.agentName ? b.personalAgents?.find((a) => a.name === b.agentName && a.enabled) : undefined;
+    if (b.agentName && !selectedAgent) throw validation('selected personal agent is missing or disabled');
+    const omConfigured = cfg.openMetadataEnabled && b.useOpenMetadata && (!selectedAgent || selectedAgent.useOpenMetadata);
+    const omMeta = omConfigured ? await this.d.secrets.get(KEYS.omMeta) : null;
+    const omKey = JSON.stringify([cfg.openMetadataRevision, cfg.runtime.openMetadata, omMeta]);
+    if (!omMeta || this.omCache?.key !== omKey || this.omCache.expires <= Date.now()) this.omCache = null;
+    if (omConfigured && omMeta) {
       try {
-        const session = await openMcp(this.http, undefined, signal);
-        const tools = allowedOMTools(await session.listTools(signal));
-        if (tools.length > 0) om = { session, tools };
-      } catch (e) { if (signal?.aborted) throw e; /* degrade */ }
+        if (this.omCache) om = this.omCache.value;
+        else {
+          const session = await openMcp(this.http, undefined, signal, cfg.runtime.openMetadata);
+          const tools = allowedOMTools(await session.listTools(signal), cfg.runtime.openMetadata.allowedTools);
+          if (tools.length > 0) {
+            // Reuse the handshake/catalog briefly; do not cache tool results.
+            const cached: OMSession = { session: {
+              listTools: (sig) => session.listTools(sig),
+              callTool: async (name, args, sig) => {
+                try { return await session.callTool(name, args, sig); }
+                catch (e) { if (this.omCache?.value === cached) this.omCache = null; throw e; }
+              },
+            }, tools };
+            om = cached;
+            this.omCache = { key: omKey, expires: Date.now() + 60_000, value: cached };
+          }
+        }
+      } catch (e) { this.omCache = null; if (signal?.aborted) throw e; /* degrade */ }
     }
 
     const built = this.build(b, true, cfg.budgetChars);
     // Untrusted metadata and the user's saved notes go into the first user turn inside nonce-fenced data blocks; the system prompt is fixed text.
-    const notes = b.dataContext ? sanitizeBlock(b.dataContext, 4000) : '';
+    const notes = b.dataContext ? sanitizeBlock(b.dataContext, cfg.runtime.memory.preambleChars) : '';
     let prefix = built.contextBlock;
     if (notes) prefix += `\n<<BUSINESS-CONTEXT-${built.nonce}>>\n${notes}\n<<END-BUSINESS-CONTEXT-${built.nonce}>>`;
     const history = messages.map((m) => ({ ...m }));
@@ -225,7 +270,7 @@ export class AgentService {
 
     let run;
     try {
-      run = await runAgent({ chat: llmChat, baseSystem: built.system, contextBlock: built.contextBlock, nonce: built.nonce, dialect: b.dialect, history, om, signal, onEvent: onTrace });
+      run = await runAgent({ runtime: cfg.runtime, chat: llmChat, baseSystem: built.system, contextBlock: built.contextBlock, nonce: built.nonce, dialect: b.dialect, history, om, signal, onEvent: onTrace, onText: emitText, personalSkills: b.personalSkills, personalAgents: b.personalAgents, agentName: b.agentName });
     } catch (e) { return fail(e); }
 
     const sql = extractSql(run.text);
@@ -235,6 +280,7 @@ export class AgentService {
       suggestedSql: sql.map((s) => s.kind), sqlMasked: sql.slice(0, 5).map((s) => maskSql(s.sql).slice(0, 1000)),
       // Q&A for the audit trail: redacted, bounded; never row data, images or tokens (the server redacts again)
       question: auditText(last.content), answer: auditText(run.text), businessContext: notes !== '', asked: run.asked !== null, contextProposals: run.proposals.length, images: last.images?.length ?? 0,
+      ...(b.agentName ? { personalAgent: b.agentName } : {}), personalSkillCount: b.personalSkills?.filter((s) => s.enabled).length ?? 0,
       harness: { llmCalls: run.stats.llmCalls, toolCalls: run.stats.toolCalls, trace: run.trace.map((e) => `${e.depth}:${e.kind}:${e.name}:${e.ok ? 'ok' : 'fail'}`) },
       ...(omConfigured ? { openMetadata: { available: om !== null, used: run.omUsed } } : {}),
     };

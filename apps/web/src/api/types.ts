@@ -1,3 +1,4 @@
+import type { AgentRuntimeConfig } from '../features/agent/runtimeConfig';
 import type { DriverType, TicketView, Permission, Role, NotifyState, TicketStatus } from '@vnpay/shared';
 
 export type { TicketView, DriverType, Permission, Role, NotifyState, TicketStatus };
@@ -21,7 +22,8 @@ export interface DbTarget {
   options?: { ssl?: boolean; connectTimeoutSec?: number } | null;
 }
 
-export interface AgentSettings { endpoints: Array<{ id: string; label: string; models: string[]; description?: string }>; defaultEndpointId: string; defaultModel: string; budgetChars: number; openMetadataEnabled?: boolean }
+export interface AgentSettings {
+ runtime: AgentRuntimeConfig; endpoints: Array<{ id: string; label: string; models: string[]; description?: string }>; defaultEndpointId: string; defaultModel: string; budgetChars: number; openMetadataEnabled?: boolean }
 export interface AgentTokenState { configured: boolean; endpointId?: string; model?: string; lastVerifiedAt?: string | null }
 export interface OpenMetadataTokenState { enabled: boolean; configured: boolean; lastVerifiedAt: string | null }
 export interface AgentToolCall { tool: string; ok: boolean; depth?: number }
@@ -32,6 +34,9 @@ export interface AgentChatResult { reply: string; sql: AgentSqlBlock[]; manifest
 export interface AgentSqlBlock { sql: string; kind: 'read' | 'write' | 'ddl' | 'other'; multi: boolean }
 
 export interface TransferOptions {
+  upload: { parallelism: number; maxRetries: number; retryBaseMs: number };
+  approval: { windowHours: number; delegationMaxDays: number };
+  download: { tokenTtlSec: number; reauthMaxAgeSec: number };
   leaders: Array<{ id: string; name: string; email: string }>;
   limits: { maxBytes: number; partBytes: number; allowedExtensions: string[]; defaultTtlHours: number; maxDownloads: number };
 }

@@ -1,6 +1,8 @@
 pub mod agent_http;
 pub mod commands;
 pub mod config;
+pub mod api_transport;
+mod secure_transport;
 pub mod custom_drivers;
 pub mod file_save;
 pub mod ssh_keys;
@@ -90,7 +92,7 @@ pub fn run() {
                 file.write_all(config::SAMPLE.as_bytes())?;
             }
             let file = std::fs::read_to_string(&cfg_path).ok();
-            let (cfg, cfg_err) = match AppConfig::resolve(file.as_deref(), &OsEnv) {
+            let (cfg, cfg_err) = match AppConfig::resolve_bootstrap(file.as_deref(), &OsEnv) {
                 Ok(c) => (c, None),
                 Err(e) => {
                     log::error!("config error: {}", e.message);
@@ -130,6 +132,9 @@ pub fn run() {
                 vault,
                 workspace,
                 config: cfg,
+                desktop_config: tokio::sync::Mutex::new(None),
+                api_transport: crate::api_transport::ApiTransport::default(),
+                agent_config: std::sync::RwLock::new(None),
                 config_error: cfg_err,
                 config_path: cfg_path.display().to_string(),
                 sidecar: mgr,
@@ -158,6 +163,10 @@ pub fn run() {
             commands::secret_set,
             commands::secret_get,
             commands::secret_delete,
+            commands::desktop_config,
+            commands::api_http_start,
+            commands::api_http_read,
+            commands::api_http_close,
             commands::agent_config,
             commands::agent_http,
             commands::agent_http_cancel,

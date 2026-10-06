@@ -29,6 +29,22 @@ export const TicketView = z.object({
 });
 export type TicketView = z.infer<typeof TicketView>;
 
+const PersonalName = z.string().min(1).max(48).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
+export const PersonalSkill = z.object({
+  name: PersonalName, label: z.string().trim().min(1).max(80),
+  description: z.string().trim().min(1).max(400), body: z.string().trim().min(10).max(8000), enabled: z.boolean(),
+});
+export type PersonalSkill = z.infer<typeof PersonalSkill>;
+export const PersonalAgent = z.object({
+  name: PersonalName, label: z.string().trim().min(1).max(80),
+  description: z.string().trim().min(1).max(400), instructions: z.string().trim().min(10).max(6000),
+  skills: z.array(z.string().max(80).regex(/^(?:personal:)?[a-z0-9]+(?:-[a-z0-9]+)*$/)).max(12),
+  enabled: z.boolean(), useOpenMetadata: z.boolean(),
+});
+export type PersonalAgent = z.infer<typeof PersonalAgent>;
+export const MAX_PERSONAL_SKILLS = 20;
+export const MAX_PERSONAL_AGENTS = 10;
+
 export const AgentChatBody = z.object({
   connectionId: z.string(),
   dialect: DriverType,
@@ -53,6 +69,9 @@ export const AgentChatBody = z.object({
   /** endpoint + model picked in the Agent popup; defaults to the ones the token was verified with */
   endpointId: z.string().max(100).optional(),
   model: z.string().max(100).optional(),
+  personalSkills: z.array(PersonalSkill).max(MAX_PERSONAL_SKILLS).optional(),
+  personalAgents: z.array(PersonalAgent).max(MAX_PERSONAL_AGENTS).optional(),
+  agentName: PersonalName.optional(),
   rows: z.object({ confirmed: z.literal(true), columns: z.array(z.string()), rows: z.array(z.array(z.unknown())).max(20) }).optional(),
   /** let the Agent look up business metadata in OpenMetadata (only when the admin configured it and the user stored a token) */
   useOpenMetadata: z.boolean().default(true),

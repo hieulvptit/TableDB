@@ -68,6 +68,7 @@ function Wizard({ options }: { options: TransferOptions }) {
     ctrl.current = new AbortController();
     try {
       const id = await runUpload({
+        ...options.upload,
         file, purpose: purpose.trim(), approverId, state: state.current, signal: ctrl.current.signal,
         onPhase: setPhase, onProgress: setProg, onHashProgress: (d, tot) => setHashPct(tot ? Math.round((d / tot) * 100) : 100),
       }, { upload: uploadApi, create: (b) => uploadsApi.create(b) });

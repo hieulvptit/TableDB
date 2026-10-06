@@ -27,7 +27,7 @@ export const viWeb = {
   'ap.delegTo': 'Ủy quyền cho',
   'ap.validFrom': 'Từ',
   'ap.validTo': 'Đến',
-  'ap.rangeInvalid': 'Khoảng thời gian không hợp lệ (tối đa 30 ngày).',
+  'ap.rangeInvalid': 'Khoảng thời gian không hợp lệ (tối đa {days} ngày).',
   'ap.delegAdd': 'Tạo ủy quyền',
   'ap.delegCreated': 'Đã tạo ủy quyền.',
   'ap.delegEmpty': 'Chưa có ủy quyền nào.',

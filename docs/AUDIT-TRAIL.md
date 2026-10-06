@@ -50,7 +50,15 @@ Bản ghi về một ticket (`resource_type=ticket`, `resource_id`=id) có thêm
 | `delegation.create` / `delegation.revoke` | ủy quyền | `delegator{…}`, `delegate{…}`, `validFrom`, `validTo`, `delegationId` |
 | `auth.login`, `auth.logout`, `auth.login_failed`, `auth.stepup`, `user.provisioned` | phiên | `provider`/`via`/`kind`, `reason` (login_failed) + trường chung §2 |
 | `audit.export` | xuất audit (`resource_type=audit`) | `format`, `minSeq`, `maxSeq`, `from`, `to` |
-| `db.*`, `agent.*` | desktop báo cáo | không đổi |
+| `db.session.open/open_failed/close`, `db.custom.session.*` | kết nối DB | target/endpoint (`driver`, `host`, `port`, `database`), authType, route; không ghi credential |
+| `db.table_view`, `db.custom.table_view` | mở/ kích hoạt tab bảng | catalog/schema/table; `ok` biểu thị kích hoạt tab, truy vấn tải dữ liệu được ghi riêng ở `db.query` |
+| `db.export`, `db.custom.export` | xuất kết quả/ô dữ liệu | catalog/schema/table (nếu biết), SQL đã che literal, format, scope (`view/all/selection/cell`), rows (số dòng), ms, ok/errorCode; thành công là đã tạo và yêu cầu tải file, không xác nhận file đã ghi xuống đĩa |
+| `db.query`, `db.custom.query` (+ `.policy_violation`) | thực thi SQL | target/endpoint, catalog/schema/table khi app biết nguồn, SQL đã che literal, mode/kind, rows/ms, ok/errorCode |
+| `agent.*` | desktop báo cáo | không đổi |
+
+SSO OIDC (web/desktop) và broker GenAI ghi `auth.login` khi thành công, `auth.login_failed` khi callback/exchange bị từ chối hoặc lỗi (kể cả dữ liệu đầu vào không hợp lệ). Identity chỉ gắn sau khi xác minh; trước đó là `anonymous`. Không ghi token, code, state hay nội dung lỗi từ upstream. Request bị middleware chặn trước handler (ví dụ rate limit) không thuộc các sự kiện này.
+
+Các sự kiện DB được desktop gửi qua `POST /db/audit`, gắn user từ session phía server. Đây là báo cáo thao tác trong ứng dụng: không bao phủ công cụ DB khác. Queue chỉ ở RAM và có giới hạn/retry, vì vậy mất kết nối lâu hoặc đóng app có thể mất bản ghi. Với SQL tự viết, audit giữ SQL đã che cùng catalog/schema; không suy đoán danh sách bảng từ SQL.
 
 ## 4. API truy vết
 * `GET /transfers/:id` — thêm `uploader`, `upload{startedAt,completedAt,durationMs,parts,throughputBps,clientKind}` (+ `clientIp`, `userAgent` **chỉ với `audit:read`**), `fileType`, `scan`, `manifest` (tóm tắt + trang đầu danh sách entry). Thấy được: người gửi, người duyệt, người được ủy quyền đang hiệu lực, `audit:read`. Người nhận thuần không thấy manifest.

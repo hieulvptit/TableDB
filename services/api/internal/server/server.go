@@ -13,6 +13,7 @@ import (
 
 	"vnpay/tabledb-api/internal/app"
 	"vnpay/tabledb-api/internal/routes"
+	"vnpay/tabledb-api/internal/securetransport"
 )
 
 // RegisterAgentRoutes mounts the Agent routes. The Agent itself runs in the desktop app; the server only has the audit sink
@@ -56,6 +57,28 @@ func Handler(d *app.Deps) http.Handler {
 	})
 
 	var h http.Handler = mux
+	if d.Cfg.SecureTransportEnabled {
+		settings := d.Cfg.SecureTransport
+		settings.ClientIP = d.ClientIP
+		transport, err := securetransport.New(settings)
+		if err != nil {
+			panic("invalid secure transport configuration")
+		}
+		h = transport.Wrap(h)
+	} else {
+		next := h
+		h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v1/secure/client.js" && r.Method == "GET" {
+				securetransport.BrowserModule(w, r, "", false)
+				return
+			}
+			if r.URL.Path == "/api/v1/secure/info" && r.Method == "GET" {
+				app.WriteJSON(w, 200, map[string]any{"enabled": false})
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 	h = cors(d, h)
 	h = securityHeaders(d, h)
 	h = requestLog(d, h)
@@ -168,7 +191,7 @@ func cors(d *app.Deps, next http.Handler) http.Handler {
 		h.Set("Access-Control-Expose-Headers", "x-content-sha256, content-disposition, x-stepup")
 		if r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {
 			h.Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-			h.Set("Access-Control-Allow-Headers", "authorization, content-type, idempotency-key, x-part-sha256, x-csrf-token")
+			h.Set("Access-Control-Allow-Headers", "authorization, content-type, idempotency-key, x-part-sha256, x-csrf-token, x-tabledb-session, x-tabledb-sequence")
 			h.Set("Access-Control-Max-Age", "600")
 			w.WriteHeader(http.StatusNoContent)
 			return

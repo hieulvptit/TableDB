@@ -1,6 +1,6 @@
 //! HTTP bridge for the local Agent (LLM gateway + OpenMetadata MCP). The webview never gets a CSP hole and never reads a stored
-//! credential: it names a *target* (an LLM endpoint id from config.json, or the OpenMetadata MCP URL); this module resolves the base
-//! URL from the validated local config, attaches the credential from the OS credential store (or the one being verified before it is
+//! credential: it names a *target* (an LLM endpoint id from server configuration, or the OpenMetadata MCP URL); this module resolves the base
+//! URL from the validated server config, attaches the credential from the OS credential store (or the one being verified before it is
 //! saved) and returns status + body. Redirects are never followed, bodies are capped, requests are cancellable.
 
 use crate::config::AgentConfig;
@@ -14,9 +14,7 @@ use tokio::sync::Notify;
 
 pub const TOKEN_KEY_LLM: &str = "agent:token:llm";
 pub const TOKEN_KEY_OM: &str = "agent:token:om";
-const MAX_BODY_IN: usize = 4 * 1024 * 1024;
-const MAX_BODY_OUT: usize = 16 * 1024 * 1024;
-const MAX_PATH: usize = 256;
+const MAX_PATH: usize = 4096;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -41,6 +39,9 @@ pub struct HttpReq {
     pub body: Option<String>,
     #[serde(default)]
     pub timeout_sec: Option<u64>,
+    /// Emit SSE response chunks to the requesting webview.
+    #[serde(default)]
+    pub stream: bool,
     /// credential to use instead of the stored one (verifying a token before it is saved)
     #[serde(default)]
     pub token: Option<String>,
@@ -87,7 +88,7 @@ fn valid_header_value(v: &str) -> bool {
 }
 
 pub struct AgentHttp {
-    client: reqwest::Client,
+    clients: Mutex<HashMap<(Option<String>, u64), reqwest::Client>>,
     inflight: Mutex<HashMap<String, Arc<Notify>>>,
 }
 
@@ -114,7 +115,7 @@ impl AgentHttp {
                 Err(_) => log::warn!("agent: proxy.url ignored (invalid)"),
             }
         }
-        Self { client: b.build().unwrap_or_default(), inflight: Mutex::new(HashMap::new()) }
+        Self { clients: Mutex::new(HashMap::from([((proxy_url.map(str::to_string), 15), b.build().unwrap_or_default())])), inflight: Mutex::new(HashMap::new()) }
     }
 
     pub fn cancel(&self, request_id: &str) {
@@ -138,15 +139,26 @@ impl AgentHttp {
     }
 
     pub async fn request(&self, request_id: &str, cfg: &AgentConfig, vault: Arc<Vault>, req: HttpReq) -> Result<HttpRes, AppError> {
+        self.request_with_progress(request_id, cfg, vault, req, None).await
+    }
+
+    pub async fn request_with_progress(&self, request_id: &str, cfg: &AgentConfig, vault: Arc<Vault>, req: HttpReq, on_chunk: Option<Arc<dyn Fn(&[u8]) + Send + Sync>>) -> Result<HttpRes, AppError> {
+        let stream = req.stream && matches!(&req.target, Target::Llm { .. });
+        let notify = Arc::new(Notify::new());
+        if let Ok(mut m) = self.inflight.lock() {
+            m.insert(request_id.to_string(), notify.clone());
+        }
+        let _guard = Guard(self, request_id.to_string());
         let (base, key) = Self::resolve(cfg, &req.target)?;
         let path = req.path.as_deref().unwrap_or("");
         validate_path(path)?;
+        if path.len() > cfg.runtime.http.max_path_chars { return Err(AppError::bad_request("agent path too long")); }
         let method = match req.method.to_ascii_uppercase().as_str() {
             "GET" => reqwest::Method::GET,
             "POST" => reqwest::Method::POST,
             _ => return Err(AppError::bad_request("method must be GET or POST")),
         };
-        if req.body.as_ref().map_or(0, |b| b.len()) > MAX_BODY_IN {
+        if req.body.as_ref().map_or(0, |b| b.len()) > cfg.runtime.http.max_request_bytes {
             return Err(AppError::bad_request("request body too large"));
         }
         let url = format!("{}{}", base.trim_end_matches('/'), path);
@@ -167,7 +179,20 @@ impl AgentHttp {
         if !valid_header_value(&auth) {
             return Err(AppError::bad_request("invalid credential"));
         }
-        let mut rb = self.client.request(method, &url).header(cfg.auth_header.as_str(), auth);
+        let client = {
+            let key = (cfg.proxy_url.clone(), cfg.runtime.http.connect_timeout_sec);
+            let mut clients = self.clients.lock().map_err(|_| err("E_INTERNAL", "HTTP client lock failed"))?;
+            if let Some(client) = clients.get(&key) { client.clone() } else {
+                let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())
+                    .connect_timeout(Duration::from_secs(key.1)).user_agent("vnpay-tabledb");
+                if let Some(proxy) = &key.0 { builder = builder.proxy(reqwest::Proxy::all(proxy).map_err(|_| AppError::bad_request("invalid proxy"))?); }
+                let client = builder.build().map_err(|_| err("E_AGENT_NETWORK", "could not create HTTP client"))?;
+                clients.clear();
+                clients.insert(key, client.clone());
+                client
+            }
+        };
+        let mut rb = client.request(method, &url).header(cfg.auth_header.as_str(), auth);
         for (k, v) in req.headers.unwrap_or_default() {
             if !allowed_header(&k) || !valid_header_value(&v) {
                 return Err(AppError::bad_request("header not allowed"));
@@ -177,13 +202,8 @@ impl AgentHttp {
         if let Some(b) = req.body {
             rb = rb.body(b);
         }
-        let timeout = Duration::from_secs(req.timeout_sec.unwrap_or(120).clamp(1, 300));
+        let timeout = Duration::from_secs(req.timeout_sec.unwrap_or(cfg.runtime.http.default_timeout_sec).clamp(1, cfg.runtime.http.max_timeout_sec));
 
-        let notify = Arc::new(Notify::new());
-        if let Ok(mut m) = self.inflight.lock() {
-            m.insert(request_id.to_string(), notify.clone());
-        }
-        let _guard = Guard(self, request_id.to_string());
         let work = async {
             let mut resp = rb.send().await.map_err(|e| {
                 log::debug!("agent http send failed: timeout={} connect={}", e.is_timeout(), e.is_connect());
@@ -195,16 +215,20 @@ impl AgentHttp {
             let session_id = hv("mcp-session-id");
             let mut buf: Vec<u8> = Vec::new();
             while let Some(chunk) = resp.chunk().await.map_err(|_| AppError::new("E_AGENT_NETWORK", "response interrupted").retryable(true))? {
-                if buf.len() + chunk.len() > MAX_BODY_OUT {
+                if buf.len() + chunk.len() > cfg.runtime.http.max_response_bytes {
                     return Err(err("E_AGENT_TOO_LARGE", "response too large"));
+                }
+                if stream && (200..300).contains(&status) && content_type.contains("text/event-stream") {
+                    if let Some(callback) = &on_chunk { callback(&chunk); }
                 }
                 buf.extend_from_slice(&chunk);
             }
             Ok(HttpRes { status, content_type, session_id, body: String::from_utf8_lossy(&buf).into_owned() })
         };
         tokio::select! {
-            r = tokio::time::timeout(timeout, work) => r.unwrap_or_else(|_| Err(AppError::new("E_AGENT_NETWORK", "request timed out").retryable(true))),
+            biased;
             _ = notify.notified() => Err(err("E_CANCELLED", "cancelled")),
+            r = tokio::time::timeout(timeout, work) => r.unwrap_or_else(|_| Err(AppError::new("E_AGENT_NETWORK", "request timed out").retryable(true))),
         }
     }
 }
@@ -221,7 +245,7 @@ mod tests {
         for bad in ["chat", "//evil.com", "/a/../b", "/a?x=1", "/a#f", "/a b", "/a\\b", "/./a", "/a\n"] {
             assert!(validate_path(bad).is_err(), "{bad}");
         }
-        assert!(validate_path(&format!("/{}", "a".repeat(300))).is_err());
+        assert!(validate_path(&format!("/{}", "a".repeat(MAX_PATH))).is_err());
     }
 
     #[test]
@@ -282,7 +306,65 @@ mod tests {
         let r: HttpReq = serde_json::from_str(r#"{"target":{"kind":"llm","endpointId":"gw"},"method":"POST","path":"/chat/completions","timeoutSec":5}"#).unwrap();
         assert!(matches!(r.target, Target::Llm { ref endpoint_id } if endpoint_id == "gw"));
         assert_eq!(r.timeout_sec, Some(5));
+        assert!(!r.stream);
         let r: HttpReq = serde_json::from_str(r#"{"target":{"kind":"om"},"method":"GET"}"#).unwrap();
         assert!(matches!(r.target, Target::Om));
     }
+
+    #[tokio::test]
+    async fn emits_sse_chunks_before_the_response_finishes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let first = b"data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n";
+        let last = b"data: [DONE]\n\n";
+        let received = Arc::new(Notify::new());
+        let server_received = received.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 2048];
+            let _ = socket.read(&mut request).await.unwrap();
+            let headers = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", first.len() + last.len());
+            socket.write_all(headers.as_bytes()).await.unwrap();
+            socket.write_all(first).await.unwrap();
+            // The server sends the final event only after the consumer sees a chunk.
+            tokio::time::timeout(Duration::from_secs(2), server_received.notified()).await.unwrap();
+            socket.write_all(last).await.unwrap();
+        });
+        let mut config = AgentConfig::default();
+        config.endpoints = vec![crate::config::AgentEndpoint { id: "gw".into(), label: "GW".into(), base_url: format!("http://{address}"), models: vec!["m".into()], description: None }];
+        let chunks = Arc::new(Mutex::new(Vec::new()));
+        let output = chunks.clone();
+        let progress: Arc<dyn Fn(&[u8]) + Send + Sync> = Arc::new(move |bytes| {
+            output.lock().unwrap().extend_from_slice(bytes);
+            received.notify_one();
+        });
+        let http = AgentHttp::new(None);
+        let req: HttpReq = serde_json::from_str(r#"{"target":{"kind":"llm","endpointId":"gw"},"method":"POST","stream":true,"body":"{}","token":"test-token","timeoutSec":5}"#).unwrap();
+        let response = http.request_with_progress("stream-test", &config, Arc::new(Vault::new("test-stream".into())), req, Some(progress)).await.unwrap();
+        server.await.unwrap();
+        assert_eq!(response.body.as_bytes(), [first.as_slice(), last.as_slice()].concat());
+        assert_eq!(chunks.lock().unwrap().as_slice(), response.body.as_bytes());
+    }
+    #[tokio::test]
+    async fn applies_server_response_byte_limit() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 2048];
+            let _ = socket.read(&mut request).await.unwrap();
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n1234567890").await.unwrap();
+        });
+        let mut config = AgentConfig::default();
+        config.endpoints = vec![crate::config::AgentEndpoint { id: "gw".into(), label: "GW".into(), base_url: format!("http://{address}"), models: vec!["m".into()], description: None }];
+        config.runtime.http.max_response_bytes = 4;
+        let http = AgentHttp::new(None);
+        let vault = Arc::new(Vault::new("test-response-limit".into()));
+        let req = HttpReq { target: Target::Llm { endpoint_id: "gw".into() }, method: "GET".into(), path: None, headers: None, body: None, timeout_sec: None, stream: false, token: Some("test-token".into()) };
+        assert_eq!(http.request("limit", &config, vault, req).await.unwrap_err().code, "E_AGENT_TOO_LARGE");
+        server.await.unwrap();
+    }
+
 }

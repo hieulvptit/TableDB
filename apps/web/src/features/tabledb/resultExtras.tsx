@@ -1,3 +1,4 @@
+import { auditReporter, type ActivityAudit } from './audit';
 import { useMemo, useState } from 'react';
 import { Badge, Button, Checkbox, Dialog, Input, Select, Spinner, formatCell, useToast } from '@vnpay/ui';
 import { classifySql, type DriverType } from '@vnpay/shared';
@@ -10,7 +11,7 @@ import { EXPORT_META, b64ToBytes, exportText, hexDump, isBinary, type ExportKind
 import { useTableDb } from './store';
 import { qualified, quoteIdent, sqlLiteral } from './tableSql';
 import type { EditCtx } from './ResultView';
-import type { Connection, EditorTabState, OutputState, ScriptLogEntry } from './types';
+import type { Connection, ResultTabState, OutputState, ScriptLogEntry } from './types';
 import { toXlsx } from './xlsx';
 
 // ------------------------------------------------------------------ script log
@@ -129,12 +130,19 @@ export function MessagesView({ messages, serverOutput }: { messages?: string[]; 
   );
 }
 
+function reportExport(conn: Connection | null | undefined, tab: ResultTabState, output: OutputState, extra: Pick<ActivityAudit, 'ok' | 'format' | 'scope' | 'rows' | 'ms' | 'errorCode'>) {
+  if (!conn) return;
+  auditReporter.report({ ...(conn.custom ? { custom: conn.custom } : { targetId: conn.targetId }), event: 'export',
+    ...(tab.table ? { catalog: tab.table.catalog, schema: tab.table.schema, table: tab.table.name } : { catalog: tab.catalog, schema: tab.schema ?? undefined }),
+    sql: output.sql, ...extra });
+}
+
 // ------------------------------------------------------------------ value viewer
 
 const FULL_LOB = 3 << 20;
 
 export function ValueViewer({ conn, tab, output, column, value, rowIndex, row, columns, edit, pkIdx, onClose }: {
-  conn: Connection | null; tab: EditorTabState; output: OutputState; column: { name: string; typeName?: string } | null; value: unknown; rowIndex: number | null;
+  conn: Connection | null; tab: ResultTabState; output: OutputState; column: { name: string; typeName?: string } | null; value: unknown; rowIndex: number | null;
   row: unknown[] | null; columns: Array<{ name: string; typeName?: string }>; edit?: EditCtx; pkIdx: number[]; onClose: () => void;
 }) {
   const toast = useToast();
@@ -166,17 +174,33 @@ export function ValueViewer({ conn, tab, output, column, value, rowIndex, row, c
     }
     throw new Error(t('viewer.noSource'));
   };
+  const savePreview = () => {
+    if (text === null) return;
+    const format = json ? 'json' : 'txt';
+    const started = Date.now();
+    try {
+      downloadText(`${name}.${format}`, json && pretty ? json : text, 'text/plain;charset=utf-8');
+      reportExport(conn, tab, output, { ok: true, format, scope: 'cell', rows: 1, ms: Date.now() - started });
+    } catch (e) {
+      reportExport(conn, tab, output, { ok: false, format, scope: 'cell', ms: Date.now() - started, errorCode: friendlyDbError(e).code });
+      toast.push((e as Error).message, 'error');
+    }
+  };
+
   const saveFull = async () => {
     setBusy(true);
+    const started = Date.now();
+    const format = bin ? 'bin' : 'txt';
     try {
       const v = await fetchFull();
       if (isBinary(v)) {
         const bytes = b64ToBytes(v.$binary);
         downloadBytes(`${name}.bin`, bytes, 'application/octet-stream');
+        reportExport(conn, tab, output, { ok: true, format: 'bin', scope: 'cell', rows: 1, ms: Date.now() - started });
         toast.push(bytes.length < v.length ? t('viewer.savedPartial', { n: bytes.length, m: v.length }) : t('viewer.saved', { n: bytes.length }), bytes.length < v.length ? 'warning' : 'success');
-      } else if (typeof v === 'string') { downloadText(`${name}.txt`, v, 'text/plain;charset=utf-8'); toast.push(t('viewer.saved', { n: v.length }), 'success'); }
+      } else if (typeof v === 'string') { downloadText(`${name}.txt`, v, 'text/plain;charset=utf-8'); reportExport(conn, tab, output, { ok: true, format: 'txt', scope: 'cell', rows: 1, ms: Date.now() - started }); toast.push(t('viewer.saved', { n: v.length }), 'success'); }
       else toast.push(t('viewer.isNull'), 'info');
-    } catch (e) { const f = friendlyDbError(e); toast.push(f.detail || f.title || (e as Error).message, 'error'); }
+    } catch (e) { const f = friendlyDbError(e); reportExport(conn, tab, output, { ok: false, format, scope: 'cell', ms: Date.now() - started, errorCode: f.code }); toast.push(f.detail || f.title || (e as Error).message, 'error'); }
     finally { setBusy(false); }
   };
 
@@ -209,7 +233,7 @@ export function ValueViewer({ conn, tab, output, column, value, rowIndex, row, c
       {column && value !== null && value !== undefined && (
         <div className="rv-viewer__foot">
           {text !== null && <Button size="sm" onClick={() => void navigator.clipboard?.writeText(json && pretty ? json : text).then(() => toast.push(t('tree.copied'), 'success'), () => {})}>{t('tt.copy')}</Button>}
-          {text !== null && <Button size="sm" onClick={() => downloadText(`${name}.${json ? 'json' : 'txt'}`, json && pretty ? json : text, 'text/plain;charset=utf-8')}>{t('viewer.saveFile')}</Button>}
+          {text !== null && <Button size="sm" onClick={savePreview}>{t('viewer.saveFile')}</Button>}
           {bin && <Button size="sm" loading={busy} onClick={() => void saveFull()}>{truncatedBin ? t('viewer.fetchSave') : t('viewer.saveFile')}</Button>}
           {text !== null && text.length >= 1_000_000 && <Button size="sm" loading={busy} onClick={() => void saveFull()}>{t('viewer.fetchSave')}</Button>}
         </div>
@@ -221,7 +245,7 @@ export function ValueViewer({ conn, tab, output, column, value, rowIndex, row, c
 // ------------------------------------------------------------------ export
 
 export function ExportResultDialog({ tab, output, columns, visibleRows, selectionRows, selectionColumns, driver, onClose }: {
-  tab: EditorTabState; output: OutputState; columns: Array<{ name: string; typeName?: string }>; visibleRows: () => unknown[][];
+  tab: ResultTabState; output: OutputState; columns: Array<{ name: string; typeName?: string }>; visibleRows: () => unknown[][];
   selectionRows?: () => unknown[][]; selectionColumns?: Array<{ name: string; typeName?: string }>; driver: DriverType; onClose: () => void;
 }) {
   const db = useTableDb();
@@ -236,6 +260,8 @@ export function ExportResultDialog({ tab, output, columns, visibleRows, selectio
   const [busy, setBusy] = useState(false);
   const go = async () => {
     setBusy(true);
+    const started = Date.now();
+    const conn = db.connections.find((c) => c.id === tab.connId);
     try {
       let cols = columns, rows: unknown[][];
       if (scope === 'selection' && selectionRows) { rows = selectionRows(); cols = selectionColumns ?? columns; }
@@ -245,9 +271,10 @@ export function ExportResultDialog({ tab, output, columns, visibleRows, selectio
       const name = `${file || 'export'}.${meta.ext}`;
       if (kind === 'xlsx') downloadBytes(name, toXlsx(cols.map((c) => c.name), rows, tab.title), meta.mime);
       else downloadText(name, exportText(kind, cols, rows, { header, delimiter: delimiter === 'tab' ? '\t' : delimiter, table, driver }), meta.mime, kind === 'csv');
+      reportExport(conn, tab, output, { ok: true, format: kind, scope, rows: rows.length, ms: Date.now() - started });
       toast.push(t('result.exported', { n: rows.length }), 'success');
       onClose();
-    } catch (e) { toast.push((e as Error).message, 'error'); } finally { setBusy(false); }
+    } catch (e) { reportExport(conn, tab, output, { ok: false, format: kind, scope, ms: Date.now() - started, errorCode: friendlyDbError(e).code }); toast.push((e as Error).message, 'error'); } finally { setBusy(false); }
   };
   return (
     <Dialog open title={t('result.export')} onClose={onClose}
@@ -305,7 +332,7 @@ export function compareResults(A: Side, B: Side, keys: string[]): CompareResult 
   return res;
 }
 
-export function CompareDialog({ current, onClose }: { current: { tab: EditorTabState; output: OutputState }; onClose: () => void }) {
+export function CompareDialog({ current, onClose }: { current: { tab: ResultTabState; output: OutputState }; onClose: () => void }) {
   const db = useTableDb();
   const candidates = db.tabs.flatMap((tb) => tb.outputs.filter((o) => o.result?.columns.length && o.id !== current.output.id).map((o) => ({ id: `${tb.id}|${o.id}`, label: `${tb.title} › ${o.title}`, o })));
   const [other, setOther] = useState(candidates[0]?.id ?? '');

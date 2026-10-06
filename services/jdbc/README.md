@@ -30,7 +30,13 @@ against Maven Central's `.sha1`, computes SHA-256 locally and writes `manifest.j
 - Session ids are random (`s_<24 hex>`). Limits/idle: env `TABLEDB_MAX_SESSIONS` (20), `TABLEDB_MAX_CURSORS` (10 per
   session), `TABLEDB_IDLE_SEC` (1800). Requests run concurrently (so `query.cancel` can overtake `query.execute`);
   responses may therefore arrive out of order - correlate by `id`.
-- A response line over 8 MiB is replaced by `E_LIMIT`; pages are also cut at ~4 MiB of cell data (`hasMore:true`).
+- Pages are capped at 4 MiB of serialized UTF-8 JSON, including escaping; a row that does not fit is retained for the next
+  page (`hasMore:true`). One oversized row returns `E_LIMIT` and closes the cursor. Additional results share a cumulative
+  response budget; the complete envelope is checked against 8 MiB before sending, with any handed-off cursor closed on failure.
+- String RPC ids are limited to 256 characters before execution; invalid ids are omitted from error envelopes.
+- `query.fetch` has a 105-second cancellation watchdog. `query.cancel` accepts either `queryId` for execute or `cursorId`
+  for an active fetch; failed/cancelled fetches close their cursor. Desktop deadlines cover both writing and waiting for a reply;
+  interrupted writes invalidate and terminate that sidecar generation to prevent a partial NDJSON frame from being reused.
 - Read-only: `setReadOnly(true)` (PostgreSQL additionally gets `readOnlyMode=always`) plus the classifier. Oracle and
   Trino do not give a hard server-side guarantee: their DB account privileges are the last barrier.
 - `proxy` (HTTP CONNECT / SOCKS5, optional username/password) and `ssh` (1-4 hops, pinned host keys) work for every driver

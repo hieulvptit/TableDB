@@ -54,6 +54,18 @@ pub async fn check_connectivity(raw: Option<&str>) -> Result<ProxyCheck, AppErro
     })
 }
 
+/// Choose the SSO route before reading credentials or starting a bridge.
+/// An unavailable proxy falls back to a direct browser connection.
+pub async fn reachable_login_proxy(raw: Option<&str>) -> Result<Option<&str>, AppError> {
+    let check = check_connectivity(raw).await?;
+    if check.reachable {
+        Ok(raw)
+    } else {
+        log::info!("SSO proxy is unavailable; using a direct connection");
+        Ok(None)
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Credentials {
@@ -358,6 +370,16 @@ mod tests {
         assert!(!check.reachable);
         assert!(check.latency_ms.is_none());
         assert!(check_connectivity(None).await.unwrap().proxy_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn login_route_falls_back_to_direct_when_proxy_is_closed() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        assert_eq!(reachable_login_proxy(Some(&url)).await.unwrap(), Some(url.as_str()));
+        drop(listener);
+        assert_eq!(reachable_login_proxy(Some(&url)).await.unwrap(), None);
+        assert_eq!(reachable_login_proxy(None).await.unwrap(), None);
     }
 
     #[test]

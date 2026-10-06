@@ -46,15 +46,17 @@ func (h *H) registerEmailApproval(rt *app.Router) {
 	})
 }
 
-const emailApprovalPage = `<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Duyệt yêu cầu · TableDB</title><script src="/api/v1/email-approval.js" defer></script></head><body style="margin:0;background:#f1f5f9;font-family:Arial,sans-serif;color:#17385e"><main style="max-width:480px;margin:12vh auto;padding:32px;background:white;border:1px solid #e2e8f0;border-radius:16px"><p style="font-weight:bold"><span style="color:#07539b">VN</span><span style="color:#e51e36">PAY</span> / TableDB</p><h1 id="title" style="font-size:26px">Đang xử lý phê duyệt…</h1><p id="message" role="status" style="line-height:1.7;color:#475569">Vui lòng đợi trong giây lát.</p><noscript>Trình duyệt cần bật JavaScript để xử lý nút duyệt từ email.</noscript></main></body></html>`
+const emailApprovalPage = `<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Duyệt yêu cầu · TableDB</title><script type="module" src="/api/v1/email-approval.js"></script></head><body style="margin:0;background:#f1f5f9;font-family:Arial,sans-serif;color:#17385e"><main style="max-width:480px;margin:12vh auto;padding:32px;background:white;border:1px solid #e2e8f0;border-radius:16px"><p style="font-weight:bold"><span style="color:#07539b">VN</span><span style="color:#e51e36">PAY</span> / TableDB</p><h1 id="title" style="font-size:26px">Đang xử lý phê duyệt…</h1><p id="message" role="status" style="line-height:1.7;color:#475569">Vui lòng đợi trong giây lát.</p><noscript>Trình duyệt cần bật JavaScript để xử lý nút duyệt từ email.</noscript></main></body></html>`
 
-const emailApprovalScript = `(async function(){
+const emailApprovalScript = `import {createSecureFetch,serverPublicKey} from "/api/v1/secure/client.js";
+(async function(){
  const title=document.getElementById('title'),message=document.getElementById('message');
  const token=location.hash.slice(1);
  history.replaceState(null,'',location.pathname);
  if(!/^[A-Za-z0-9_-]{43}$/.test(token)){title.textContent='Link không hợp lệ';message.textContent='Vui lòng sử dụng nút Duyệt yêu cầu trong email mới nhất.';return;}
  try{
-  const response=await fetch(location.pathname,{method:'POST',credentials:'omit',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});
+  const secureFetch=createSecureFetch({baseUrl:"/api/v1",clientKind:"web",serverPublicKey});
+  const response=await secureFetch(location.pathname,{method:'POST',credentials:'omit',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});
   if(!response.ok){title.textContent='Không thể duyệt yêu cầu';message.textContent=response.status===403||response.status===409?'Link đã hết hạn, đã được sử dụng hoặc yêu cầu không còn chờ bạn duyệt.':'Hệ thống chưa xử lý được. Vui lòng thử lại từ email.';return;}
   const result=await response.json();
   title.textContent='Đã phê duyệt thành công';

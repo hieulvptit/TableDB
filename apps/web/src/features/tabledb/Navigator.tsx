@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { Button, Dialog, useToast } from '@vnpay/ui';
 import { useAuth } from '../../auth/AuthContext';
 import { createGateway } from '../../gateway';
@@ -15,7 +15,7 @@ import {
 import { Icon } from './icons';
 import { MonitorDialog, SchemaCompareDialog, SearchDialog } from './DbTools';
 import { SchemaTree, storeHasMatch } from './SchemaTree';
-import { useTableDb } from './store';
+import { useTableDbSelector, type TableDbApi } from './store';
 import type { Connection } from './types';
 
 /** one tree root: a saved connection (open or not) or an open session that has no saved profile */
@@ -25,8 +25,9 @@ const driverOf = (p: LocalProfile) => (p.custom!.driver === 'custom' ? p.custom!
 const DRIVER_MARK: Record<string, string> = { oracle: 'O', postgresql: 'P', trino: 'T' };
 
 /** DBeaver-style "Database Navigator": toolbar + one tree root per saved connection; connecting expands it into catalogs/schemas/tables. */
-export function Navigator({ onNewConnection, onEditConnection }: { onNewConnection: () => void; onEditConnection: (profileId: string, connect?: boolean) => void }) {
-  const db = useTableDb();
+const navigatorState = (db: TableDbApi) => ({ connections: db.connections, activeConn: db.activeConn, setActiveConn: db.setActiveConn, addConnection: db.addConnection, reconnectConnection: db.reconnectConnection, removeConnection: db.removeConnection, newTab: db.newTab });
+export const Navigator = memo(function Navigator({ onNewConnection, onEditConnection }: { onNewConnection: () => void; onEditConnection: (profileId: string, connect?: boolean) => void }) {
+  const db = useTableDbSelector(navigatorState);
   const toast = useToast();
   const { can } = useAuth();
   const conn = db.activeConn;
@@ -230,4 +231,4 @@ export function Navigator({ onNewConnection, onEditConnection }: { onNewConnecti
       </Dialog>
     </div>
   );
-}
+});

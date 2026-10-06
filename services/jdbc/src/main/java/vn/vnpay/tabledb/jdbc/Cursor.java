@@ -25,7 +25,8 @@ public final class Cursor {
     private final ValueEncoder.Limits limits;
     private int delivered;
     private boolean positioned;
-    private boolean closed;
+    private volatile boolean closed;
+    private List<Object> pendingRow;
     /** the statement is closed with the cursor only once the cursor owns it (handed off to query.fetch) */
     private boolean ownsStatement = true;
     public volatile long lastUsed = System.nanoTime();
@@ -61,6 +62,7 @@ public final class Cursor {
     }
 
     public int delivered() { return delivered; }
+    Statement statement() { return st; }
 
     /** Keep the statement open when the result set ends (the caller still reads further results from it). */
     Cursor keepStatement() { ownsStatement = false; return this; }
@@ -71,32 +73,39 @@ public final class Cursor {
         lastUsed = System.nanoTime();
         int limit = Math.min(count, maxRows - delivered);
         List<List<Object>> rows = new ArrayList<>();
-        long size = 0;
+        long size = 2; // serialized rows array brackets
         boolean exhausted = false;
         while (rows.size() < limit) {
-            if (!positioned && !rs.next()) { exhausted = true; break; }
-            positioned = false;
-            List<Object> row = new ArrayList<>(types.length);
-            for (int i = 0; i < types.length; i++) {
-                Object v = ValueEncoder.read(rs, i + 1, types[i], limits);
-                size += ValueEncoder.approxSize(v);
-                row.add(v);
+            List<Object> row = pendingRow;
+            if (row == null) {
+                if (!positioned && !rs.next()) { exhausted = true; break; }
+                positioned = false;
+                row = new ArrayList<>(types.length);
+                for (int i = 0; i < types.length; i++) row.add(ValueEncoder.read(rs, i + 1, types[i], limits));
             }
+            long rowBytes = Json.write(row).getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            if (rowBytes + 2 > PAGE_BYTE_BUDGET) {
+                close();
+                throw RpcError.limit("one row exceeds the response byte budget; reduce lobLimit or select fewer columns");
+            }
+            long added = rowBytes + (rows.isEmpty() ? 0 : 1);
+            if (size + added > PAGE_BYTE_BUDGET) { pendingRow = row; break; }
+            pendingRow = null;
+            size += added;
             rows.add(row);
             delivered++;
-            if (size > PAGE_BYTE_BUDGET) break;
         }
         if (exhausted) {
             close();
             return new Page(rows, false, false);
         }
-        if (!positioned) positioned = rs.next();
+        if (pendingRow == null && !positioned) positioned = rs.next();
         if (delivered >= maxRows) {
-            boolean more = positioned;
+            boolean more = pendingRow != null || positioned;
             close();
             return new Page(rows, false, more);
         }
-        if (!positioned) {
+        if (pendingRow == null && !positioned) {
             close();
             return new Page(rows, false, false);
         }
@@ -106,6 +115,7 @@ public final class Cursor {
     public void close() {
         if (closed) return;
         closed = true;
+        pendingRow = null;
         session.cursors.remove(id);
         try { rs.close(); } catch (SQLException | RuntimeException ignored) { }
         if (ownsStatement) try { st.close(); } catch (SQLException | RuntimeException ignored) { }

@@ -3,6 +3,8 @@ import { MemoryTokenStore, toEpochMs, type StoredTokens, type TokenStore } from 
 import type { TokenBundle } from './types';
 
 export interface RequestOptions {
+  /** Native transport for a pinned desktop API route; retains session refresh/retry. */
+  fetchImpl?: typeof fetch;
   query?: Record<string, string | number | boolean | undefined | null>;
   body?: unknown;
   /** raw body (e.g. Blob for part upload); when set `body` is ignored */
@@ -119,7 +121,7 @@ export class ApiClient {
 
     let res: Response;
     try {
-      res = await this.fetchImpl(this.url(path, opts.query), init);
+      res = await (opts.fetchImpl ?? this.fetchImpl)(this.url(path, opts.query), init);
     } catch (e) {
       if ((e as { name?: string }).name === 'AbortError') throw new ApiError('ABORTED', 'aborted', 0);
       throw new ApiError('NETWORK', (e as Error).message || 'network error', 0);

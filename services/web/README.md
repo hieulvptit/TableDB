@@ -25,3 +25,5 @@ npm run build            # tsc + vite build -> services/web/dist
 ## Triển khai
 
 nginx phục vụ thư mục `services/web/dist` tại `/` (xem `deploy/nginx.conf`) và proxy `/api` tới API.
+
+AES application transport, independent web/desktop keys and deployment settings: [SECURE-TRANSPORT.md](../../docs/SECURE-TRANSPORT.md).

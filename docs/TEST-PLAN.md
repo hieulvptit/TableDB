@@ -2,6 +2,8 @@
 
 ## 1. Kiểm thử tự động (chạy được ngay, không cần hạ tầng VNPAY)
 
+`npm test` chạy shared, desktop SPA, web BO và API. `npm run typecheck` kiểm tra tất cả workspace TypeScript. CI `Application checks` chạy các bộ frontend, build desktop SPA/web BO và `go test -race ./...`; workflow desktop kiểm tra JDBC và Rust khi đóng gói.
+
 | Bộ | Lệnh | Bao phủ chính |
 |---|---|---|
 | shared | `npm test -w @vnpay/shared` | classifier SQL (vector dùng chung TS/Java), RBAC + trạng thái ticket, redact, **context Agent không vượt quyền** (chỉ bảng trong `accessible`, ngân sách, chống injection, dòng dữ liệu cần xác nhận) |
@@ -9,6 +11,7 @@
 | jdbc | `cd services/jdbc && mvn test` | xem `services/jdbc/README.md` |
 | desktop | `cd apps/desktop/src-tauri && cargo test` | PKCE RFC 7636, loopback callback (state/lỗi/timeout), allowlist method sidecar, size cap, restart policy, redaction |
 | web/desktop SPA | `npm test -w @vnpay/web` | hai bản build (web không có TableDB/upload, desktop không có duyệt/tải/admin), CSRF/bearer/step-up, chunker upload, disclosure context Agent, xác nhận ghi, hàng đợi audit DB, guard quyền |
+| web BO | `npm test -w @vnpay/web-bo` | routes, guards, API client, upload và giao diện chuyển file/manifest |
 
 **Chưa được kiểm thử tự động (cần môi trường thật):** kết nối Oracle/Trino/PG thật; Trino SSO end-to-end; SMTP relay thật (mới kiểm với SMTP stub); LLM thật; build/cài trên Windows; Credential Manager; updater; jump/PAM.
 

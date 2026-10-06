@@ -26,6 +26,10 @@ Chi tiết, tham số ký mã (`-CertThumbprint`) và updater: `apps/desktop/REA
 ### Thành phần
 `services/api` (API + worker cùng process; có thể tách bằng cách chạy nhiều instance — outbox dùng `FOR UPDATE SKIP LOCKED`), PostgreSQL ≥ 14, kho file, reverse proxy (`deploy/nginx.conf`), SPA tĩnh (`apps/web/dist`).
 
+Mỗi worker dành 2 slot cho scan/rescan, 4 cho email, 2 cho purge và 1 cho loại job khác; mỗi slot nhận một job rồi nhận tiếp ngay khi hoàn tất. Sweeper chạy độc lập. Lease job là 5 phút, gia hạn mỗi 100 giây; `attempts` là thế hệ sở hữu dùng để chặn worker cũ cập nhật kết quả sau khi job đã được nhận lại. Email vẫn có ngữ nghĩa at-least-once nếu process dừng sau khi SMTP nhận thư nhưng trước khi ghi kết quả.
+
+Upload part giữ khóa dòng ticket trong lúc publish file và metadata, nên các part của cùng ticket được ghi lần lượt. Khi đo tải, theo dõi thời gian chờ pool/khóa ticket cùng tốc độ ghi kho file.
+
 ### Các bước
 1. **DB:** tạo database + user riêng; `DATABASE_URL` trong secret store.
 2. **Cấu hình:** sao chép `deploy/env.example` → `/etc/tabledb/api.env` (quyền 600; trên **Windows** xem §2b), điền theo `docs/VNPAY-INPUTS.md`. Prod bắt buộc: `APP_ENV=prod`, `PUBLIC_URL=https://…`, `DATABASE_URL`, `DATA_KEY`/KMS, `OIDC_PROVIDERS`; `ALLOW_DEV_LOGIN` phải là `0` (API từ chối khởi động nếu sai).
@@ -110,3 +114,5 @@ Cảnh báo: PostgreSQL trên cùng máy cũng tính vào % đĩa; janitor khôn
 
 ## 4. Nâng cấp
 API: triển khai bản mới → migration tự chạy → kiểm `readyz`. Web: thay `dist`. Desktop: phát hành bản mới qua updater; driver cập nhật cùng bản sidecar (checksum khóa trong `manifest.json` đóng gói).
+
+Tham số DB/query, upload/retry, duyệt/ủy quyền và tải file được quản lý tại API server. Xem bảng biến và thứ tự triển khai trong [services/api/README.md](../services/api/README.md#tham-số-db-và-chuyển-file-trên-server). Cần triển khai API có `/db/config` trước desktop mới; mở lại màn hình để tải cấu hình sau khi khởi động lại API.

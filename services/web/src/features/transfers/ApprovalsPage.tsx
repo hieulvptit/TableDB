@@ -76,7 +76,7 @@ function Delegations() {
   const [until, setUntil] = useState(() => toLocalInput(new Date(Date.now() + 7 * 864e5)));
   const [busy, setBusy] = useState(false);
   const spanMs = new Date(until).getTime() - new Date(from).getTime();
-  const valid = to && from && until && spanMs > 0 && spanMs <= 30 * 864e5;
+  const valid = to && from && until && spanMs > 0 && spanMs <= (state.data?.[1].approval.delegationMaxDays ?? 0) * 864e5;
   const add = async () => {
     setBusy(true);
     try { await approvalsApi.createDelegation({ toUserId: to, validFrom: new Date(from).toISOString(), validTo: new Date(until).toISOString() }); toast.push(t('ap.delegCreated'), 'success'); setTo(''); state.reload(); }
@@ -89,7 +89,7 @@ function Delegations() {
           <Select label={t('ap.delegTo')} value={to} onChange={(e) => setTo(e.target.value)} placeholder={t('common.choose')}
             options={opts.leaders.filter((l) => l.id !== me?.user.id).map((l) => ({ value: l.id, label: `${l.name} (${l.email})` }))} />
           <Input label={t('ap.validFrom')} type="datetime-local" value={from} onChange={(e) => setFrom(e.target.value)} />
-          <Input label={t('ap.validTo')} type="datetime-local" value={until} onChange={(e) => setUntil(e.target.value)} error={until && from && !(spanMs > 0 && spanMs <= 30 * 864e5) ? t('ap.rangeInvalid') : undefined} />
+          <Input label={t('ap.validTo')} type="datetime-local" value={until} onChange={(e) => setUntil(e.target.value)} error={until && from && !(spanMs > 0 && spanMs <= (state.data?.[1].approval.delegationMaxDays ?? 0) * 864e5) ? t('ap.rangeInvalid', { days: state.data?.[1].approval.delegationMaxDays ?? 0 }) : undefined} />
           <Button type="submit" variant="primary" disabled={!valid} loading={busy}>{t('ap.delegAdd')}</Button>
         </form>
         {list.length === 0 ? <EmptyState title={t('ap.delegEmpty')} /> : (

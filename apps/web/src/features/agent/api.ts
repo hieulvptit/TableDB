@@ -1,3 +1,5 @@
+import { apiClient } from '../../api/client';
+import type { AgentConfigInfo } from '../../runtime/tauri';
 import type { AgentChatBody } from '@vnpay/shared';
 import { desktopCommands } from '../../runtime/tauri';
 import type { AgentChatResult, AgentSettings, AgentTokenState, AgentTraceEvent, OpenMetadataTokenState } from '../../api/types';
@@ -6,9 +8,15 @@ import type { PreviewBody } from './context';
 import { AgentService } from './service';
 
 let svc: AgentService | null = null;
-/** The Agent runs in this app: no /agent/* server calls (only the metadata-only audit record is sent). */
+/** The Agent runs in this app: server supplies deployment config and receives audit records. */
 const service = () => (svc ??= new AgentService({
-  config: () => desktopCommands.agentConfig(),
+  config: () => apiClient.get<AgentConfigInfo>('/agent/config', {
+    fetchImpl: async (_url, init) => {
+      const auth = new Headers(init?.headers).get('Authorization') ?? '';
+      const res = await desktopCommands.agentConfig(auth.replace(/^Bearer /, ''));
+      return new Response(res.body, { status: res.status, headers: { 'Content-Type': 'application/json' } });
+    },
+  }),
   secrets: { get: desktopCommands.secretGet, set: desktopCommands.secretSet, delete: desktopCommands.secretDelete },
   audit: (body) => agentAuditReporter.reportRaw(body),
 }));
@@ -27,5 +35,5 @@ export const agentApi = {
   preview: (b: PreviewBody, _signal?: AbortSignal) => service().preview(b),
   chat: (b: AgentChatBody, signal?: AbortSignal): Promise<AgentChatResult> => service().chat(b, undefined, signal),
   /** Streams live steps (`onTrace`) and resolves with the final result. */
-  chatStream: (b: AgentChatBody, onTrace: (e: AgentTraceEvent) => void, signal?: AbortSignal): Promise<AgentChatResult> => service().chat(b, onTrace, signal),
+  chatStream: (b: AgentChatBody, onTrace: (e: AgentTraceEvent) => void, signal?: AbortSignal, onText?: (text: string) => void): Promise<AgentChatResult> => service().chat(b, onTrace, signal, onText),
 };

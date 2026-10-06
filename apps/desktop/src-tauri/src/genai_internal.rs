@@ -10,7 +10,6 @@
 use crate::error::AppError;
 use crate::genai::{
     build_login_url, check_login_url, navigation_decision, webview_proxy, GenaiLoginParams, GenaiLoginResult, NavDecision,
-    INTERNAL_CONNECT_PORT,
 };
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -92,12 +91,13 @@ pub async fn run(
     allowed_origins: &[String],
     proxy: Option<&str>,
     persist_sso: bool,
+    connect_port: u16,
     cancel: oneshot::Receiver<()>,
 ) -> Result<GenaiLoginResult, AppError> {
     let base = check_login_url(&params.login_url, allowed_origins)?;
     let proxy = webview_proxy(proxy)?;
     let secs = params.timeout_sec.unwrap_or(300).clamp(5, 600);
-    let url = build_login_url(&base, &INTERNAL_CONNECT_PORT.to_string());
+    let url = build_login_url(&base, &connect_port.to_string());
 
     close_window(&app); // stale window from a previous run, if any
     let (tx, rx) = oneshot::channel::<Outcome>();
@@ -119,7 +119,7 @@ pub async fn run(
             let ev = match p.event() { tauri::webview::PageLoadEvent::Started => "started", tauri::webview::PageLoadEvent::Finished => "finished" };
             log::info!("genai: page {ev} {}://{}{}", u.scheme(), u.host_str().unwrap_or("?"), u.path());
         })
-        .on_navigation(move |u| match navigation_decision(u, INTERNAL_CONNECT_PORT) {
+        .on_navigation(move |u| match navigation_decision(u, connect_port) {
             NavDecision::Allow => {
                 // diagnostics: scheme/host/path only — never the query string (it can carry tokens/codes)
                 log::info!("genai: nav allow {}://{}{}", u.scheme(), u.host_str().unwrap_or("?"), u.path());

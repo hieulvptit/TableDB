@@ -29,7 +29,7 @@ impl Default for SidecarConfig {
     }
 }
 
-/// One LLM endpoint the local Agent may call (replaces the admin-managed `agent_settings` of the old server-side Agent).
+/// One LLM endpoint the local Agent may call, supplied by the API server.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentEndpoint {
@@ -41,10 +41,14 @@ pub struct AgentEndpoint {
     pub description: Option<String>,
 }
 
-/// Local Agent settings. Contains no secrets: tokens live in the OS credential store.
+/// Agent deployment settings. Contains no secrets: tokens live in the OS credential store.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentConfig {
+    #[serde(default = "default_agent_runtime")]
+    pub runtime: AgentRuntime,
+    #[serde(skip)]
+    pub proxy_url: Option<String>,
     #[serde(default)]
     pub endpoints: Vec<AgentEndpoint>,
     #[serde(default)]
@@ -64,6 +68,43 @@ pub struct AgentConfig {
     #[serde(default = "default_auth_scheme")]
     pub auth_scheme: String,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpSettings {
+ pub connect_timeout_sec: u64, pub default_timeout_sec: u64, pub max_timeout_sec: u64,
+ pub max_request_bytes: usize, pub max_response_bytes: usize, pub max_path_chars: usize,
+}
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct AgentRuntime {
+ pub http: HttpSettings,
+ #[serde(flatten)] pub settings: serde_json::Map<String, serde_json::Value>,
+}
+fn default_agent_runtime() -> AgentRuntime {
+ let v: serde_json::Value = serde_json::from_str(include_str!("../../../../services/api/internal/config/agent-defaults.json")).expect("valid server defaults");
+ serde_json::from_value(v["runtime"].clone()).expect("valid server runtime defaults")
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopDeployment {
+ #[serde(flatten)] pub config: AppConfig,
+ pub genai_timeout_sec: u64,
+ pub genai_internal_connect_port: u16,
+ pub config_timeout_sec: u64,
+}
+impl DesktopDeployment {
+ pub fn validate(&mut self, bootstrap: &AppConfig) -> Result<(), AppError> {
+  self.config.env = bootstrap.env.clone();
+  self.config.api_base_url = bootstrap.api_base_url.clone();
+  self.config.server_signing_public_key = bootstrap.server_signing_public_key.clone();
+  self.config.validate()?;
+  if !(5..=600).contains(&self.genai_timeout_sec) || !(1..=120).contains(&self.config_timeout_sec) || self.genai_internal_connect_port<1024 || crate::genai::BROWSER_BLOCKED_PORTS.contains(&self.genai_internal_connect_port) {
+   return Err(AppError::bad_request("invalid server desktop configuration"));
+  }
+  Ok(())
+ }
+}
 fn default_budget() -> u32 {
     12_000
 }
@@ -75,12 +116,16 @@ fn default_auth_scheme() -> String {
 }
 impl Default for AgentConfig {
     fn default() -> Self {
-        Self { endpoints: vec![], default_endpoint_id: None, default_model: None, budget_chars: default_budget(), open_metadata_url: None, auth_header: default_auth_header(), auth_scheme: default_auth_scheme() }
+        Self { runtime: default_agent_runtime(), proxy_url: None, endpoints: vec![], default_endpoint_id: None, default_model: None, budget_chars: default_budget(), open_metadata_url: None, auth_header: default_auth_header(), auth_scheme: default_auth_scheme() }
     }
 }
 
 impl AgentConfig {
-    fn validate(&mut self, env: &str) -> Result<(), AppError> {
+    pub fn validate(&mut self, env: &str) -> Result<(), AppError> {
+        let h = &self.runtime.http;
+        if h.max_request_bytes == 0 || h.max_request_bytes > 16 * 1024 * 1024 || h.max_response_bytes == 0 || h.max_response_bytes > 64 * 1024 * 1024 || h.max_timeout_sec == 0 || h.max_timeout_sec > 900 || h.default_timeout_sec == 0 || h.default_timeout_sec > h.max_timeout_sec || h.connect_timeout_sec == 0 || h.connect_timeout_sec > h.max_timeout_sec || h.max_path_chars == 0 || h.max_path_chars > 4096 {
+         return Err(AppError::bad_request("invalid server HTTP limits"));
+        }
         let https_only = |u: &url::Url| env != "prod" || u.scheme() == "https";
         if self.endpoints.len() > 16 {
             return Err(AppError::bad_request("agent.endpoints: at most 16"));
@@ -160,6 +205,8 @@ pub struct AppConfig {
     pub env: String,
     #[serde(default)]
     pub api_base_url: String,
+    #[serde(default = "default_signing_pin")]
+    pub server_signing_public_key: String,
     #[serde(default)]
     pub proxy: ProxyConfig,
     #[serde(default)]
@@ -180,9 +227,13 @@ pub struct AppConfig {
     /// SSO-only HTTP proxy. Credentials are kept in the OS vault, never in config.json.
     #[serde(default)]
     pub genai_proxy_url: Option<String>,
-    /// Local Agent (LLM endpoints, OpenMetadata MCP). The Agent runs in this app, not on the API server.
+    /// Legacy local settings, parsed for compatibility. Runtime Agent settings come from the server.
     #[serde(default)]
     pub agent: AgentConfig,
+}
+fn default_signing_pin() -> String {
+ let sample: serde_json::Value = serde_json::from_str(SAMPLE).expect("valid sample");
+ sample["serverSigningPublicKey"].as_str().unwrap_or("").to_string()
 }
 fn default_true() -> bool {
     true
@@ -195,7 +246,7 @@ fn default_env() -> String {
 }
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { env: default_env(), api_base_url: String::new(), proxy: ProxyConfig::default(), sidecar: SidecarConfig::default(), genai_login_origins: default_genai_origins(), genai_secret_path: false, genai_persist_sso: true, genai_login_browser: GenaiBrowser::Internal, genai_proxy_url: None, agent: AgentConfig::default() }
+        Self { env: default_env(), api_base_url: String::new(), server_signing_public_key: default_signing_pin(), proxy: ProxyConfig::default(), sidecar: SidecarConfig::default(), genai_login_origins: default_genai_origins(), genai_secret_path: false, genai_persist_sso: true, genai_login_browser: GenaiBrowser::Internal, genai_proxy_url: None, agent: AgentConfig::default() }
     }
 }
 
@@ -211,11 +262,33 @@ impl EnvSource for OsEnv {
 }
 
 impl AppConfig {
+    /// Production bootstrap reads only fields required to reach the config server.
+    pub fn resolve_bootstrap(file: Option<&str>, env: &dyn EnvSource) -> Result<Self, AppError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Bootstrap {
+            #[serde(default = "default_env")] env: String,
+            #[serde(default)] api_base_url: String,
+            #[serde(default = "default_signing_pin")] server_signing_public_key: String,
+            #[serde(default)] proxy: ProxyConfig,
+        }
+        let raw: Bootstrap = serde_json::from_str(file.unwrap_or("{}"))
+            .map_err(|_| AppError::bad_request("invalid bootstrap configuration"))?;
+        let mut config = AppConfig { env: raw.env, api_base_url: raw.api_base_url, server_signing_public_key: raw.server_signing_public_key, proxy: raw.proxy, ..AppConfig::default() };
+        if let Some(v) = env.get("TABLEDB_ENV") { config.env = v.trim().into(); }
+        if let Some(v) = env.get("TABLEDB_API_BASE_URL") { config.api_base_url = v.trim().into(); }
+        if let Some(v) = env.get("TABLEDB_PROXY_URL") { config.proxy.url = Some(v.trim().into()); }
+        if let Some(v) = env.get("TABLEDB_SERVER_SIGNING_PUBLIC_KEY") { config.server_signing_public_key = v.trim().into(); }
+        config.validate()?;
+        Ok(config)
+    }
+
     pub fn parse(json: &str) -> Result<Self, AppError> {
         serde_json::from_str(json).map_err(|e| AppError::bad_request(format!("config.json invalid: {e}")))
     }
 
     pub fn apply_env(&mut self, env: &dyn EnvSource) {
+        if let Some(v) = env.get("TABLEDB_SERVER_SIGNING_PUBLIC_KEY") { self.server_signing_public_key = v.trim().into(); }
         if let Some(v) = env.get("TABLEDB_ENV") {
             self.env = v.trim().to_string();
         }
@@ -396,4 +469,29 @@ mod tests {
         let c = AppConfig::resolve(Some(r#"{"apiBaseUrl":"https://a.com","genaiLoginOrigins":["https://g.test.vn/"]}"#), &none).unwrap();
         assert_eq!(c.genai_login_origins, vec!["https://g.test.vn".to_string()]);
     }
+    #[test]
+    fn server_desktop_settings_replace_local_operational_values() {
+        let mut bootstrap = AppConfig::default();
+        bootstrap.env = "test".into();
+        bootstrap.api_base_url = "http://127.0.0.1:8080".into();
+        bootstrap.genai_proxy_url = Some("http://old-proxy:3359".into());
+        let mut remote: DesktopDeployment = serde_json::from_str(include_str!("../../../../services/api/internal/config/desktop-defaults.json")).unwrap();
+        remote.config.genai_proxy_url = None;
+        remote.config.sidecar.max_heap_mb = 1024;
+        remote.validate(&bootstrap).unwrap();
+        assert_eq!(remote.config.api_base_url, bootstrap.api_base_url);
+        assert_eq!(remote.config.sidecar.max_heap_mb, 1024);
+        assert!(remote.config.genai_proxy_url.is_none());
+        remote.genai_internal_connect_port = 6000;
+        assert!(remote.validate(&bootstrap).is_err());
+    }
+
+    #[test]
+    fn production_bootstrap_ignores_obsolete_operational_fields() {
+        let json = r#"{"env":"test","apiBaseUrl":"http://127.0.0.1:8080","agent":"obsolete","genaiLoginOrigins":["invalid"],"sidecar":{"maxHeapMb":1}}"#;
+        let config = AppConfig::resolve_bootstrap(Some(json), &Fake(std::collections::HashMap::new())).unwrap();
+        assert_eq!(config.api_base_url, "http://127.0.0.1:8080");
+        assert!(config.agent.endpoints.is_empty());
+    }
+
 }

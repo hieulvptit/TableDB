@@ -20,6 +20,7 @@ export interface FlowInput {
   /** state kept between attempts so "retry" resumes instead of restarting */
   state?: { sha256?: string; ticketId?: string; partBytes?: number; totalParts?: number; idempotencyKey?: string };
   parallelism?: number;
+  maxRetries?: number;
   retryBaseMs?: number;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -48,7 +49,7 @@ async function resumeUploadFlow(inp: FlowInput, st: { ticketId: string; partByte
   // Always ask the server what it has (cheap, and makes retry == resume).
   await resumeUpload({
     source: inp.file, ticketId: st.ticketId, partBytes: st.partBytes, idempotencyKey: st.idempotencyKey,
-    parallelism: inp.parallelism ?? 3, onProgress: inp.onProgress, signal: inp.signal, retryBaseMs: inp.retryBaseMs, sleep: inp.sleep,
+    parallelism: inp.parallelism, maxRetries: inp.maxRetries, onProgress: inp.onProgress, signal: inp.signal, retryBaseMs: inp.retryBaseMs, sleep: inp.sleep,
   }, { ...api, complete: async (id, key) => { inp.onPhase?.('completing'); return api.complete(id, key); } });
 }
 

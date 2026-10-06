@@ -1,3 +1,5 @@
+import { setDbRuntimeConfig } from '../features/tabledb/runtimeConfig';
+import { TEST_DB_CONFIG } from './dbConfig';
 import '@testing-library/jest-dom/vitest';
 import { afterEach } from 'vitest';
 import { cleanup } from '@testing-library/react';
@@ -8,13 +10,15 @@ import { setLocale } from '../i18n';
 // Existing feature tests assert Vietnamese copy; the product default (English) is covered in i18n.test.ts.
 setLocale('vi');
 try { localStorage.setItem('tabledb.locale', 'vi'); } catch { /* no storage */ } // survives vi.resetModules() re-imports of the i18n module
+setDbRuntimeConfig(TEST_DB_CONFIG);
 reloadWorkspaceForTests();
 
 afterEach(() => {
   cleanup();
   // editor tabs / history / snippets persisted by one test must not leak into the next
   try { for (const k of Object.keys(localStorage)) if (k.startsWith(WS_PREFIX)) localStorage.removeItem(k); } catch { /* no storage */ }
-  reloadWorkspaceForTests();
+  setDbRuntimeConfig(TEST_DB_CONFIG);
+reloadWorkspaceForTests();
 });
 
 if (!globalThis.requestAnimationFrame) {

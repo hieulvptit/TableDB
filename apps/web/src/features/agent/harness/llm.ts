@@ -1,5 +1,6 @@
 // LLM provider adapter: auth header, paths, body template and response path come from a mapping; the default is the VNPAY AI
 // gateway contract (OpenAI-compatible, genai.vnpay.vn/aigateway/<llm>/v1). The Rust core adds the credential header.
+import { CompletionStream } from './stream';
 import { ApiError } from '../../../api/errors';
 import type { AgentHttp } from './bridge';
 import type { ChatMsg } from './harness';
@@ -13,10 +14,8 @@ export interface LlmMapping {
 }
 
 /** Verify is a 1-token completion: the gateway may not expose /models. */
-export const VNPAY_GATEWAY_MAPPING: LlmMapping = {
-  verify: { method: 'POST', path: '/chat/completions', body: { model: '{{model}}', messages: [{ role: 'user', content: 'ping' }], max_tokens: 1 }, okStatus: [200] },
-  chat: { method: 'POST', path: '/chat/completions', body: { model: '{{model}}', messages: '{{allMessages}}', max_tokens: 8192, temperature: 0.2 }, responsePath: 'choices.0.message.content' },
-};
+import { DEFAULT_RUNTIME } from '../runtimeConfig';
+export const VNPAY_GATEWAY_MAPPING: LlmMapping = DEFAULT_RUNTIME.llm;
 
 /** OpenAI-compatible wire form: a message with images becomes a content-part array; others stay plain strings. */
 export function toWire(m: ChatMsg): Record<string, unknown> {
@@ -55,7 +54,7 @@ export function getPath(o: unknown, path: string): unknown {
 }
 
 export class LlmProvider {
-  constructor(private http: AgentHttp, private mapping: LlmMapping = VNPAY_GATEWAY_MAPPING) {}
+  constructor(private http: AgentHttp, private mapping: LlmMapping = VNPAY_GATEWAY_MAPPING, private timeoutSec = DEFAULT_RUNTIME.llm.timeoutSec) {}
 
   /** `token` set = verify that credential; unset = the stored one. */
   async verify(ep: LlmEndpoint, model: string, token?: string, signal?: AbortSignal): Promise<VerifyResult> {
@@ -63,20 +62,35 @@ export class LlmProvider {
     const body = m.body === undefined ? undefined : JSON.stringify(renderTemplate(m.body, { model }));
     let status: number;
     try {
-      status = (await this.http({ target: { kind: 'llm', endpointId: ep.id }, method: m.method || 'GET', path: m.path, ...(body !== undefined ? { body, headers: { 'Content-Type': 'application/json' } } : {}), ...(token ? { token } : {}) }, signal)).status;
+      status = (await this.http({ target: { kind: 'llm', endpointId: ep.id }, method: m.method || 'GET', path: m.path, timeoutSec: this.timeoutSec, ...(body !== undefined ? { body, headers: { 'Content-Type': 'application/json' } } : {}), ...(token ? { token } : {}) }, signal)).status;
     } catch (e) { if (signal?.aborted) throw e; return { ok: false, reason: 'endpoint unreachable' }; }
     return (m.okStatus.length ? m.okStatus : [200]).includes(status) ? { ok: true } : { ok: false, reason: `endpoint answered ${status}` };
   }
 
-  async chat(ep: LlmEndpoint, model: string, messages: ChatMsg[], signal?: AbortSignal): Promise<string> {
+  async chat(ep: LlmEndpoint, model: string, messages: ChatMsg[], signal?: AbortSignal, onText?: (text: string) => void): Promise<string> {
     const m = this.mapping.chat;
     const all = messages.map(toWire);
     const system = messages.filter((x) => x.role === 'system').map((x) => x.content).join('\n');
     const rest = messages.filter((x) => x.role !== 'system').map(toWire);
-    const body = JSON.stringify(renderTemplate(m.body, { model, system, messages: rest, allMessages: all }));
-    const res = await this.http({ target: { kind: 'llm', endpointId: ep.id }, method: m.method || 'POST', path: m.path, headers: { 'Content-Type': 'application/json', ...(m.extraHeaders ?? {}) }, body, timeoutSec: 120 }, signal);
+    const rendered = renderTemplate(m.body, { model, system, messages: rest, allMessages: all });
+    const streaming = !!onText && m.responsePath === 'choices.0.message.content' && rendered !== null && typeof rendered === 'object' && !Array.isArray(rendered);
+    const body = JSON.stringify(streaming ? { ...rendered as Record<string, unknown>, stream: true } : rendered);
+    const live = new CompletionStream(onText);
+    let streamError: unknown;
+    const res = await this.http({ target: { kind: 'llm', endpointId: ep.id }, method: m.method || 'POST', path: m.path, headers: { 'Content-Type': 'application/json', ...(m.extraHeaders ?? {}) }, body, timeoutSec: this.timeoutSec }, signal, streaming ? (chunk) => {
+      try { live.push(chunk); } catch (e) { streamError = e; }
+    } : undefined);
     if (res.status === 401 || res.status === 403) throw new ApiError('VALIDATION', 'LLM token rejected', 400);
     if (res.status < 200 || res.status > 299) throw new ApiError('UPSTREAM', `LLM endpoint HTTP ${res.status}`, 502);
+    if (res.contentType.includes('text/event-stream')) {
+      if (streamError) throw streamError;
+      // Parse the full response too: completion and event delivery can race across IPC.
+      const complete = new CompletionStream();
+      complete.push(res.body);
+      const text = complete.finish();
+      onText?.(text);
+      return text;
+    }
     let doc: unknown;
     try { doc = JSON.parse(res.body); } catch { throw new ApiError('UPSTREAM', 'unexpected LLM response shape', 502); }
     const v = getPath(doc, m.responsePath);

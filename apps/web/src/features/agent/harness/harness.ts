@@ -4,15 +4,30 @@
 // deterministic context compaction, repeat/failure guards, completion guard for the plan.
 import { redactText, sanitizeField } from '@vnpay/shared';
 
-export const LIMITS = {
-  maxLlmCalls: 14, maxToolCalls: 24, deadlineMs: 150_000, maxParallel: 4,
-  inlineChars: 3500, readChars: 3500, storeChars: 120_000, compactAtChars: 48_000,
-  maxNudges: 2, repeatLimit: 3, failStreakLimit: 3,
-};
+import { DEFAULT_RUNTIME, type HarnessConfig } from '../runtimeConfig';
+export const LIMITS = DEFAULT_RUNTIME.harness;
+
+/** Enforces one wall-clock limit, including pending transport/tool calls. */
+export async function withDeadline<T>(ms: number, signal: AbortSignal | undefined, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const ctrl = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: () => void = () => {};
+  const stopped = new Promise<never>((_resolve, reject) => {
+    onAbort = () => { ctrl.abort(signal?.reason); reject(new Error('cancelled')); };
+    if (signal?.aborted) { onAbort(); return; }
+    signal?.addEventListener('abort', onAbort, { once: true });
+    timer = setTimeout(() => { ctrl.abort(); reject(new Error('Agent deadline exceeded')); }, Math.max(0, ms));
+  });
+  try {
+    if (ctrl.signal.aborted) return await stopped;
+    if (ms <= 0) { ctrl.abort(); throw new Error('Agent deadline exceeded'); }
+    return await Promise.race([run(ctrl.signal), stopped]);
+  } finally { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); }
+}
 
 export interface TraceEvent { kind: 'thinking' | 'tool' | 'subagent' | 'nudge' | 'compact' | 'final'; name: string; ok: boolean; ms: number; depth: number; note?: string }
 export interface ChatMsg { role: 'system' | 'user' | 'assistant'; content: string; images?: string[] }
-export type ChatFunc = (messages: ChatMsg[], signal?: AbortSignal) => Promise<string>;
+export type ChatFunc = (messages: ChatMsg[], signal?: AbortSignal, onText?: (text: string) => void) => Promise<string>;
 export interface Todo { content: string; status: 'pending' | 'in_progress' | 'completed' }
 export interface ContextProposal { kind: 'entity' | 'terminology' | 'filter' | 'metric' | 'gotcha'; text: string }
 export interface AskUser { question: string; options: string[] }
@@ -25,13 +40,14 @@ export class Budget {
   readonly deadline: number;
   constructor(readonly maxLlm = LIMITS.maxLlmCalls, readonly maxTools = LIMITS.maxToolCalls, deadlineMs = LIMITS.deadlineMs) { this.deadline = Date.now() + deadlineMs; }
   llmLeft() { return this.maxLlm - this.llmCalls; }
-  expired() { return Date.now() > this.deadline; }
-  takeLlm() { return ++this.llmCalls; }
+  expired() { return Date.now() >= this.deadline; }
+  takeLlm(reserve = 0) { if (this.llmLeft() <= reserve) return false; return ++this.llmCalls; }
   takeTool() { if (this.toolCalls >= this.maxTools) return false; this.toolCalls++; return true; }
 }
 
 /** In-memory scratch space for one run: oversized or elided tool results live here and are read back in slices. */
 export class Vfs {
+  constructor(private limits: HarnessConfig = LIMITS) {}
   private files = new Map<string, string>();
   private order: string[] = [];
   private n = 0;
@@ -40,7 +56,7 @@ export class Vfs {
     this.n++;
     const path = `/${dir}/${this.n}-${label.replace(/[^\w-]/g, '_').slice(0, 40)}.txt`;
     if (!this.files.has(path)) this.order.push(path);
-    this.files.set(path, content.slice(0, LIMITS.storeChars));
+    this.files.set(path, content.slice(0, this.limits.storeChars));
     return path;
   }
 
@@ -68,7 +84,7 @@ export class Vfs {
     let i = start;
     for (; i < end; i++) {
       const row = `${i + 1}\t${lines[i]}`;
-      if (chars + row.length > LIMITS.readChars) break;
+      if (chars + row.length > this.limits.readChars) break;
       out.push(row);
       chars += row.length + 1;
     }
@@ -94,6 +110,7 @@ export class Vfs {
 
 /** State shared by one agent run (the orchestrator and all its sub-agents). */
 export interface RunShared {
+  limits: HarnessConfig;
   budget: Budget;
   vfs: Vfs;
   trace: TraceEvent[];
@@ -102,13 +119,15 @@ export interface RunShared {
   signal?: AbortSignal;
   /** live progress; called for every trace event as it happens */
   onEvent?: (e: TraceEvent) => void;
+  onText?: (text: string) => void;
   /** set by ask_user: the run stops and the question goes back to the user */
   asked: AskUser | null;
   proposals: ContextProposal[];
 }
 
-export function newShared(o: { nonce: string; chat: ChatFunc; signal?: AbortSignal; onEvent?: (e: TraceEvent) => void }): RunShared {
-  return { budget: new Budget(), vfs: new Vfs(), trace: [], nonce: o.nonce, chat: o.chat, signal: o.signal, onEvent: o.onEvent, asked: null, proposals: [] };
+export function newShared(o: { nonce: string; chat: ChatFunc; signal?: AbortSignal; onEvent?: (e: TraceEvent) => void; onText?: (text: string) => void; limits?: HarnessConfig }): RunShared {
+  const limits = o.limits ?? LIMITS;
+  return { limits, budget: new Budget(limits.maxLlmCalls, limits.maxToolCalls, limits.deadlineMs), vfs: new Vfs(limits), trace: [], nonce: o.nonce, chat: o.chat, signal: o.signal, onEvent: o.onEvent, onText: o.onText, asked: null, proposals: [] };
 }
 
 export interface ToolCtx { shared: RunShared; depth: number; todos: Todo[] }
@@ -198,29 +217,44 @@ export async function runLoop(o: LoopOpts): Promise<string> {
   };
   const llm = async (): Promise<string> => {
     if (budget.cancelled || sh.signal?.aborted) throw cancelled();
-    const n = budget.takeLlm();
+    if (budget.expired()) throw new Error('Agent deadline exceeded');
+    const n = budget.takeLlm(o.depth > 0 ? 1 : 0);
+    if (n === false) throw new Error('LLM budget exhausted');
     emit({ kind: 'thinking', name: o.depth > 0 ? 'sub-agent' : 'agent', ok: true, ms: 0, depth: o.depth, note: `call ${n}` });
-    return sh.chat([...messages], sh.signal);
+    return sh.chat([...messages], sh.signal, o.depth === 0 && sh.onText ? (text) => {
+      if (sh.signal?.aborted || budget.expired()) return;
+      // Never expose tool JSON; hold partial fence prefixes until their language is known.
+      const visible = /```tool\b/i.test(text) ? '' : text.replace(/```(?:t(?:o(?:o(?:l)?)?)?)?$/i, '').replace(/`{1,2}$/, '');
+      sh.onText?.(visible);
+    } : undefined);
   };
 
   for (let step = 0; ; step++) {
-    if (step >= o.maxSteps || budget.llmLeft() <= reserve || budget.expired()) {
+    if (budget.expired()) throw new Error('Agent deadline exceeded');
+    if (step >= o.maxSteps || budget.llmLeft() <= reserve || budget.deadline - Date.now() <= Math.min(10_000, sh.limits.deadlineMs * 0.15)) {
       // final-answer mode: no tools
+      if (o.depth > 0 && budget.llmLeft() <= 1) {
+        // Parallel children share this counter. The final-answer path must respect the parent's reserve too.
+        const results = resultMsgs.slice(-2).map((r) => messages[r.idx]!.content).join('\n\n');
+        return results || stripToolBlocks([...messages].reverse().find((m) => m.role === 'assistant')?.content ?? '') || 'Sub-agent budget exhausted before a report could be generated.';
+      }
       if (budget.llmLeft() <= 0) return 'Không đủ ngân sách để hoàn tất câu trả lời. Hãy hỏi lại, thu hẹp phạm vi hơn.';
       addUser('Tool budget exhausted. Answer now with what you already have, state what remains uncertain, and do not call tools.');
       const t0 = Date.now();
       const final = await llm();
+      if (sh.signal?.aborted) throw cancelled();
       pushTrace({ kind: 'final', name: 'budget', ok: true, ms: Date.now() - t0, depth: o.depth });
       return stripToolBlocks(final) || 'Chưa đủ dữ kiện để trả lời trọn vẹn.';
     }
 
     compact(messages, resultMsgs, sh, o.depth);
     const text = await llm();
+    if (sh.signal?.aborted) throw cancelled();
     const { calls, errs } = parseToolCalls(text);
 
     if (calls.length === 0 && errs.length === 0) {
       const open = tc.todos.filter((t) => t.status !== 'completed');
-      if (open.length > 0 && nudges < LIMITS.maxNudges) {
+      if (open.length > 0 && nudges < sh.limits.maxNudges) {
         nudges++;
         pushTrace({ kind: 'nudge', name: 'open-todos', ok: true, ms: 0, depth: o.depth, note: `${open.length} open` });
         messages.push({ role: 'assistant', content: text },
@@ -232,8 +266,8 @@ export async function runLoop(o: LoopOpts): Promise<string> {
     }
 
     // execute (parallel, bounded). The cheap checks run in order; only tool.run itself is concurrent.
-    const batch = calls.slice(0, LIMITS.maxParallel);
-    const overflow = calls.length - LIMITS.maxParallel;
+    const batch = calls.slice(0, sh.limits.maxParallel);
+    const overflow = calls.length - sh.limits.maxParallel;
     const blocks: Block[] = new Array(batch.length + errs.length);
     const running: Promise<void>[] = [];
     batch.forEach((c, i) => {
@@ -252,7 +286,7 @@ export async function runLoop(o: LoopOpts): Promise<string> {
       const key = `${c.tool}:${JSON.stringify(c.args)}`;
       const n = (seen.get(key) ?? 0) + 1;
       seen.set(key, n);
-      if (n >= LIMITS.repeatLimit) { finish(false, `ERROR: identical call repeated ${n} times. Change the approach (different arguments or tool) or answer now.`, false); return; }
+      if (n >= sh.limits.repeatLimit) { finish(false, `ERROR: identical call repeated ${n} times. Change the approach (different arguments or tool) or answer now.`, false); return; }
       budget.takeTool();
       running.push((async () => {
         let raw: string;
@@ -262,8 +296,8 @@ export async function runLoop(o: LoopOpts): Promise<string> {
           return;
         }
         if (tool.trusted) { finish(true, raw, true); return; }
-        let body = sanitizeBlock(raw, LIMITS.storeChars);
-        if (!tool.noEvict && body.length > LIMITS.inlineChars) {
+        let body = sanitizeBlock(raw, sh.limits.storeChars);
+        if (!tool.noEvict && body.length > sh.limits.inlineChars) {
           const path = sh.vfs.put('results', name, body);
           body = `Result too large (${body.length} chars, ${body.split('\n').length} lines) - saved to ${path}. Read it in slices with read_file(path, offset, limit) or search it with grep(pattern, path). Preview:\n${preview(body)}`;
         }
@@ -278,11 +312,11 @@ export async function runLoop(o: LoopOpts): Promise<string> {
     await Promise.all(running);
     if (sh.signal?.aborted) throw cancelled();
     const all = blocks.slice();
-    if (overflow > 0) all.push({ id: ++callId, name: 'limit', ok: false, trusted: false, body: `ERROR: at most ${LIMITS.maxParallel} tool calls per message; ${overflow} ignored.` });
+    if (overflow > 0) all.push({ id: ++callId, name: 'limit', ok: false, trusted: false, body: `ERROR: at most ${sh.limits.maxParallel} tool calls per message; ${overflow} ignored.` });
 
     const parts = all.map((b) => `<<TOOL-RESULT-${sh.nonce} id=${b.id} tool=${b.name}>>\n${b.body}\n<<END-TOOL-RESULT-${sh.nonce}>>`);
     failStreak = all.some((b) => b.ok) ? 0 : failStreak + 1;
-    const tail = failStreak >= LIMITS.failStreakLimit
+    const tail = failStreak >= sh.limits.failStreakLimit
       ? '\n\nSeveral tool rounds failed in a row. Stop retrying the same approach: re-read the metadata, try something different, or answer with what you have and say what is missing.' : '';
     messages.push({ role: 'assistant', content: text }, { role: 'user', content: parts.join('\n') + tail });
     resultMsgs.push({ idx: messages.length - 1, keep: all.every((b) => b.trusted), done: false });
@@ -297,7 +331,7 @@ export async function runLoop(o: LoopOpts): Promise<string> {
 /** Deterministic compaction (no extra LLM call): when the transcript grows, older tool results move to the VFS behind a pointer. */
 function compact(messages: ChatMsg[], resultMsgs: ResultMsg[], sh: RunShared, depth: number): void {
   const total = () => messages.reduce((n, m) => n + m.content.length, 0);
-  if (total() <= LIMITS.compactAtChars) return;
+  if (total() <= sh.limits.compactAtChars) return;
   let candidates = resultMsgs.map((r, i) => (!r.keep && !r.done ? i : -1)).filter((i) => i >= 0);
   candidates = candidates.length >= 2 ? candidates.slice(0, -2) : []; // always keep the two most recent results
   let freed = 0;
@@ -308,7 +342,7 @@ function compact(messages: ChatMsg[], resultMsgs: ResultMsg[], sh: RunShared, de
     messages[r.idx] = { role: 'user', content: `<<TOOL-RESULT-${sh.nonce} elided>>\nOlder tool results were removed to save context (${original.length} chars). Full text: ${path} (read_file / grep).\n<<END-TOOL-RESULT-${sh.nonce}>>` };
     r.done = true;
     freed += original.length;
-    if (total() <= LIMITS.compactAtChars * 0.7) break;
+    if (total() <= sh.limits.compactAtChars * 0.7) break;
   }
   if (freed > 0) sh.trace.push({ kind: 'compact', name: 'elide-results', ok: true, ms: 0, depth, note: `${freed} chars` });
 }

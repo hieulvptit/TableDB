@@ -1,4 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { loadDbRuntimeConfig } from './runtimeConfig';
+import { useAsync } from '../../hooks';
+import { AsyncView } from '../../components/AsyncView';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button, Dialog, Spinner, SplitPane, Tabs } from '@vnpay/ui';
 import { DashboardDialog } from '../report/DashboardDialog';
 import { AgentPanel } from '../agent/AgentPanel';
@@ -48,7 +51,9 @@ function Workspace() {
     document.body.classList.add('agent-resizing');
     window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
   };
-  const collapseAgent = () => { refocusFab.current = true; setAgentOpen(false); };
+  const collapseAgent = useCallback(() => { refocusFab.current = true; setAgentOpen(false); }, []);
+  const newConnection = useCallback(() => setConnectDlg({}), []);
+  const editConnection = useCallback((id: string, connect?: boolean) => setConnectDlg({ id, connect }), []);
   // after collapsing, keyboard focus lands on the bubble instead of being lost with the hidden popup
   useEffect(() => { if (!agentOpen && refocusFab.current) { refocusFab.current = false; fabRef.current?.focus(); } }, [agentOpen]);
   const conn = db.activeConn;
@@ -80,7 +85,7 @@ function Workspace() {
     <div className="tdb-workspace" style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
       <div style={{ flex: 1, minHeight: 0 }}>
         <SplitPane primary="first" initial={290} min={200} max={520} label={t('layout.resizeTree')}>
-          <Navigator onNewConnection={() => setConnectDlg({})} onEditConnection={(id, connect) => setConnectDlg({ id, connect })} />
+          <Navigator onNewConnection={newConnection} onEditConnection={editConnection} />
           <div style={{ height: '100%', minHeight: 0, minWidth: 0, display: 'flex', flexDirection: 'column' }}>{center}</div>
         </SplitPane>
       </div>
@@ -129,6 +134,7 @@ function Workspace() {
 export default function TableDbPage() {
   // saved tabs are restored when the provider mounts: wait until the (encrypted) workspace is loaded
   const ready = useWorkspaceReady();
+  const config = useAsync(loadDbRuntimeConfig, []);
   if (!ready) return <div className="ui-row" style={{ padding: 24 }}><Spinner label={t('common.loading')} /> {t('common.loading')}</div>;
-  return <TableDbProvider><Workspace /></TableDbProvider>;
+  return <AsyncView state={config}>{() => <TableDbProvider><Workspace /></TableDbProvider>}</AsyncView>;
 }

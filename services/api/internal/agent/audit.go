@@ -1,5 +1,5 @@
 // Package agent: the SQL Agent runs entirely in the desktop app (harness, LLM and OpenMetadata calls, tokens). The server keeps
-// only an audit sink, like /db/audit: the desktop reports one record per Agent action: metadata plus the redacted question and
+// deployment configuration and an audit sink, like /db/audit: the desktop reports one record per Agent action: metadata plus the redacted question and
 // answer text and the proposed SQL with literals masked. Never rows, images or tokens. The server cannot verify the content,
 // so entries are marked reportedBy=desktop.
 package agent
@@ -98,8 +98,21 @@ func clean(v any, depth int) (any, bool) {
 	return nil, false
 }
 
-// Register mounts POST /api/v1/agent/audit.
+// Register mounts the Agent deployment config and audit routes.
 func Register(rt *app.Router, d *app.Deps) {
+	rt.GET("/desktop/config", app.Opts{Public: true}, func(w http.ResponseWriter, r *http.Request) error {
+		w.Header().Set("Cache-Control", "no-store")
+		app.WriteJSON(w, 200, d.Cfg.Desktop)
+		return nil
+	})
+	rt.GET("/agent/config", app.Opts{}, func(w http.ResponseWriter, r *http.Request) error {
+		if _, err := app.Need(r, "agent:use"); err != nil {
+			return err
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		app.WriteJSON(w, 200, d.Cfg.Agent)
+		return nil
+	})
 	rate := &app.Rate{Max: 120, Window: time.Minute}
 	rt.POST("/agent/audit", app.Opts{Rate: rate}, func(w http.ResponseWriter, r *http.Request) error {
 		a, err := app.Need(r, "agent:use")

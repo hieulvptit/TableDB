@@ -1,3 +1,5 @@
+import { TEST_DB_CONFIG } from '../../test/dbConfig';
+import { apiClient } from '../../api/client';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
@@ -18,6 +20,7 @@ const profile = (id: string, name: string, savePassword: boolean) => ({
 let sidecar: string[];
 beforeEach(() => {
   sidecar = [];
+  apiClient.configure({ fetchImpl: async () => new Response(JSON.stringify(TEST_DB_CONFIG), { headers: { "Content-Type": "application/json" } }) });
   localStorage.clear();
   localStorage.setItem('tabledb.localProfiles.v2', JSON.stringify([profile('a', 'Alpha DB', true), profile('b', 'Beta DB', false)]));
   (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {

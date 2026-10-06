@@ -1,0 +1,103 @@
+{
+  "endpoints": [
+    {
+      "id": "vnpay-kimi",
+      "label": "VNPAY · Kimi",
+      "baseUrl": "https://genai.vnpay.vn/aigateway/llm_kimi/v1",
+      "models": [
+        "v_kimi"
+      ],
+      "description": "Gateway nội bộ VNPAY — mặc định, không gửi data ra ngoài"
+    },
+    {
+      "id": "vnpay-minimax",
+      "label": "VNPAY · MiniMax",
+      "baseUrl": "https://genai.vnpay.vn/aigateway/llm_minimax/v1",
+      "models": [
+        "v_minimax27"
+      ],
+      "description": "Gateway nội bộ VNPAY — không gửi data ra ngoài"
+    }
+  ],
+  "defaultEndpointId": "vnpay-kimi",
+  "defaultModel": "v_kimi",
+  "budgetChars": 12000,
+  "openMetadataUrl": null,
+  "authHeader": "Authorization",
+  "authScheme": "Bearer",
+  "runtime": {
+    "llm": {
+      "verify": {
+        "method": "POST",
+        "path": "/chat/completions",
+        "body": {
+          "model": "{{model}}",
+          "messages": [
+            {
+              "role": "user",
+              "content": "ping"
+            }
+          ],
+          "max_tokens": 1
+        },
+        "okStatus": [
+          200
+        ]
+      },
+      "chat": {
+        "method": "POST",
+        "path": "/chat/completions",
+        "body": {
+          "model": "{{model}}",
+          "messages": "{{allMessages}}",
+          "max_tokens": 8192,
+          "temperature": 0.2
+        },
+        "responsePath": "choices.0.message.content"
+      },
+      "timeoutSec": 120
+    },
+    "harness": {
+      "maxLlmCalls": 14,
+      "maxToolCalls": 24,
+      "deadlineMs": 150000,
+      "maxParallel": 4,
+      "inlineChars": 3500,
+      "readChars": 3500,
+      "storeChars": 120000,
+      "compactAtChars": 48000,
+      "maxNudges": 2,
+      "repeatLimit": 3,
+      "failStreakLimit": 3,
+      "maxSteps": 10,
+      "subagentMaxSteps": 4,
+      "subagentChars": 6000,
+      "researcherMaxSteps": 6
+    },
+    "openMetadata": {
+      "allowedTools": [
+        "search_metadata",
+        "get_entity_details",
+        "get_entity_lineage"
+      ],
+      "protocolVersion": "2025-03-26",
+      "timeoutSec": 30
+    },
+    "http": {
+      "connectTimeoutSec": 15,
+      "defaultTimeoutSec": 120,
+      "maxTimeoutSec": 300,
+      "maxRequestBytes": 4194304,
+      "maxResponseBytes": 16777216,
+      "maxPathChars": 256
+    },
+    "memory": {
+      "keepRecent": 12,
+      "summarizeAfter": 24,
+      "preambleChars": 4000,
+      "messageChars": 8000,
+      "summaryInputChars": 5500,
+      "summaryOutputChars": 1500
+    }
+  }
+}

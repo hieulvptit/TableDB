@@ -1,4 +1,5 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { dbRuntimeConfig } from './runtimeConfig';
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { useToast } from '@vnpay/ui';
 import { classifySql, type SqlClassification } from '@vnpay/shared';
 import type { BindValue, QueryResult } from '../../gateway';
@@ -93,24 +94,52 @@ export interface TableDbApi {
   setAgentRows: (r: AgentRowsAttachment | null) => void;
 }
 
-const Ctx = createContext<TableDbApi | null>(null);
-export const useTableDb = () => { const c = useContext(Ctx); if (!c) throw new Error('TableDbProvider missing'); return c; };
+interface TableDbStore {
+  get: () => TableDbApi;
+  subscribe: (listener: () => void) => () => void;
+  publish: (value: TableDbApi) => void;
+}
+function createTableDbStore(initial: TableDbApi): TableDbStore {
+  let current = initial;
+  const listeners = new Set<() => void>();
+  return {
+    get: () => current,
+    subscribe: (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
+    publish: (value) => { if (value === current) return; current = value; listeners.forEach((listener) => listener()); },
+  };
+}
+// A stable context carries subscriptions; query output and SQL edits need not notify unrelated views.
+// Plain API values remain supported for consumers providing a context directly.
+const Ctx = createContext<TableDbStore | TableDbApi | null>(null);
+const noSubscribe = () => () => {};
+export function useTableDbSelector<T extends object>(select: (value: TableDbApi) => T): T {
+  const source = useContext(Ctx);
+  if (!source) throw new Error('TableDbProvider missing');
+  const cache = useRef<T>();
+  const snapshot = useCallback(() => {
+    const next = select('get' in source ? source.get() : source);
+    const prev = cache.current;
+    if (prev && Object.keys(prev).length === Object.keys(next).length && Object.keys(next).every((key) => Object.prototype.hasOwnProperty.call(prev, key) && Object.is(prev[key as keyof T], next[key as keyof T]))) return prev;
+    cache.current = next;
+    return next;
+  }, [source, select]);
+  return useSyncExternalStore('subscribe' in source ? source.subscribe : noSubscribe, snapshot, snapshot);
+}
+const selectAll = (value: TableDbApi) => value;
+export const useTableDb = () => useTableDbSelector(selectAll);
 export { Ctx as TableDbContext };
 
-const PAGE = 500;
-/** table data views fetch smaller pages (fast first paint) and keep fetching while the user scrolls, like DBeaver */
-const TABLE_PAGE = 200;
-const TABLE_MAX_ROWS = 100_000; // sidecar cap
 const MAX_OUTPUTS = 10;
 const activeOutputOf = (tab: EditorTabState) => tab.outputs.find((o) => o.id === tab.activeOutputId) ?? tab.outputs[tab.outputs.length - 1];
-const pageOf = (tab: EditorTabState) => (tab.kind === 'table' ? TABLE_PAGE : PAGE);
+/** Table data views fetch smaller pages and keep fetching while the user scrolls. */
+const pageOf = (tab: EditorTabState) => (tab.kind === 'table' ? dbRuntimeConfig().tablePageSize : dbRuntimeConfig().pageSize);
 let tabSeq = 0;
 const mkTab = (conn: Connection | null, sql = '', extra: Partial<EditorTabState> = {}): EditorTabState => ({
   id: uid(), title: t('tabledb.tabTitle', { n: ++tabSeq }), connId: conn?.id ?? null, ...(conn?.profileId ? { profileId: conn.profileId } : {}),
-  sql, mode: 'read', maxRows: 1000, timeoutSec: 60, running: false, kind: 'sql', outputs: [], outputSeq: 0, ...extra,
+  sql, mode: 'read', maxRows: dbRuntimeConfig().defaultMaxRows, timeoutSec: dbRuntimeConfig().defaultTimeoutSec, running: false, kind: 'sql', outputs: [], outputSeq: 0, ...extra,
 });
 const mkTableTab = (conn: Connection, ref: TableRef, filter = ''): EditorTabState => ({
-  id: uid(), title: ref.name, connId: conn.id, sql: tableDataSql(ref, conn.driver, filter), mode: 'read', maxRows: TABLE_MAX_ROWS, timeoutSec: 60, running: false,
+  id: uid(), title: ref.name, connId: conn.id, sql: tableDataSql(ref, conn.driver, filter), mode: 'read', maxRows: dbRuntimeConfig().maxRows, timeoutSec: dbRuntimeConfig().defaultTimeoutSec, running: false,
   kind: 'table', table: ref, filter, view: 'grid', outputs: [], outputSeq: 0,
 });
 /** tabs of the previous run (text only, not connected yet) */
@@ -351,7 +380,7 @@ export function TableDbProvider({ children, writeAllowedOverride, audit = auditR
     const kind = classifySql(spec.sql).kind;
     // Audit record for this execution (raw SQL: the server masks literals). Counts/timing only, never row data.
     const auditQuery = (ok: boolean, extra: { rows?: number; ms?: number; errorCode?: string }) =>
-      auditRef.current.report({ ...(conn.custom ? { custom: conn.custom } : { targetId: conn.targetId }), mode: spec.mode, kind, sql: spec.sql, ok, ...extra });
+      auditRef.current.report({ ...(conn.custom ? { custom: conn.custom } : { targetId: conn.targetId }), mode: spec.mode, kind, sql: spec.sql, ok, ...(tab.catalog ? { catalog: tab.catalog } : {}), ...(tab.table ? { schema: tab.table.schema, table: tab.table.name, catalog: tab.table.catalog } : tab.schema ? { schema: tab.schema } : {}), ...extra });
     const history = (ok: boolean, extra: { rows?: number; ms?: number; errorCode?: string }) => {
       if (tab.kind !== 'table') addHistory({ sql: spec.sql, connName: conn.name, ...(conn.profileId ? { profileId: conn.profileId } : {}), driver: conn.driverName ?? conn.driver, mode: spec.mode, ok, ...extra });
     };
@@ -569,6 +598,7 @@ export function TableDbProvider({ children, writeAllowedOverride, audit = auditR
   const openTable = useCallback((ref: TableRef, filter?: string) => {
     const conn = connsRef.current.find((c) => c.id === activeConnId);
     if (!conn) return;
+    auditRef.current.report({ ...(conn.custom ? { custom: conn.custom } : { targetId: conn.targetId }), event: 'table_view', ok: true, catalog: ref.catalog, schema: ref.schema, table: ref.name });
     const open = tabsRef.current.find((x) => x.kind === 'table' && x.connId === conn.id && x.table && tableKey(x.table) === tableKey(ref));
     if (open) {
       setActiveTabId(open.id);
@@ -723,7 +753,7 @@ export function TableDbProvider({ children, writeAllowedOverride, audit = auditR
     return r;
   }, [updateConnection]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const selected = activeConnId ? selectedBy[activeConnId] ?? [] : [];
+  const selected = useMemo(() => activeConnId ? selectedBy[activeConnId] ?? [] : [], [activeConnId, selectedBy]);
   const setSelected = useCallback((s: SelectedTable[]) => {
     if (!activeConnId) return;
     const seen = new Set<string>();
@@ -742,5 +772,7 @@ export function TableDbProvider({ children, writeAllowedOverride, audit = auditR
     patchOutput, setActiveOutput, closeOutput, cancel, loadMore, loadAll, openTable, setTableFilter, setTableSort, pendingWrite, confirmWrite, skipWrite, dismissWrite, pendingBinds, resolveBinds,
     pendingDisconnect, resolveDisconnect, setAutoCommit, commit, rollback, setSchema, runWrites, agentRows]);
 
-  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
+  const [store] = useState(() => createTableDbStore(value));
+  useLayoutEffect(() => { store.publish(value); }, [store, value]);
+  return <Ctx.Provider value={store}>{children}</Ctx.Provider>;
 }

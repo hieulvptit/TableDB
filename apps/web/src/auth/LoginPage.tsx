@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useState } from 'react';
 import { Navigate, useNavigate, useSearchParams } from 'react-router-dom';
 import { Button, Input, Spinner, useToast } from '@vnpay/ui';
 import { apiClient } from '../api/client';
+import { useRuntime } from '../runtime/RuntimeContext';
 import type { AuthConfig } from '../api/types';
 import { useAsync } from '../hooks';
 import { errorMessage, t } from '../i18n';
@@ -23,6 +24,7 @@ export default function LoginPage() {
   const [busy, setBusy] = useState('');
   const [devEmail, setDevEmail] = useState('');
   const desktop = apiClient.isDesktop;
+  const runtime = useRuntime();
 
   const signIn = async (provider: string) => {
     rememberProvider(provider);
@@ -55,7 +57,7 @@ export default function LoginPage() {
         {GenaiLoginPanel && desktop && (
           <Suspense fallback={null}>
             <GenaiLoginPanel loginUrl={cfg.data?.desktopLoginUrl ?? null}
-              api={{ loading: cfg.loading, error: cfg.error, ready: !!cfg.data, baseUrl: apiClient.baseUrl, retry: cfg.reload }}
+              api={{ loading: cfg.loading, error: cfg.error, ready: !!cfg.data, baseUrl: apiClient.baseUrl, retry: cfg.reload, connectionMode: runtime.apiConnectionMode }}
               onDone={async () => { await refresh({ strict: true }); nav(returnTo, { replace: true }); }} />
           </Suspense>
         )}

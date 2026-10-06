@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-api-http-close"
+description = "Enables the api_http_close command without any pre-configured scope."
+commands.allow = ["api_http_close"]
+
+[[permission]]
+identifier = "deny-api-http-close"
+description = "Denies the api_http_close command without any pre-configured scope."
+commands.deny = ["api_http_close"]

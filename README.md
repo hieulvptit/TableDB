@@ -22,11 +22,18 @@ Quy trình chuyển file: upload (desktop) → kiểm tra PII/nội dung → ema
 ## Chạy nhanh (dev, không cần Postgres/IdP thật)
 ```bash
 npm install
-npm test                                  # shared (TS) + api (Go)
+npm test                                  # shared + desktop SPA + web BO + api (Go)
+npm run typecheck                         # tất cả workspace TypeScript
 cd services/api
 APP_ENV=dev ALLOW_DEV_LOGIN=1 BOOTSTRAP_ADMINS=you@vnpay.vn go run ./cmd/server   # Postgres nhúng (tải binary lần đầu), đăng nhập dev
 ```
 `ALLOW_DEV_LOGIN` bị từ chối khi `APP_ENV=prod`.
+
+## Build và phát hành
+
+Workflow `.github/workflows/desktop-build.yml` build Desktop (Windows, macOS, Ubuntu, Debian), API service x64 (Linux và Windows) và web BO. Push tag `desktop-v<version>` để phát hành các gói cùng một GitHub Release, ví dụ `desktop-v0.1.1`. Version desktop trong `tauri.conf.json`, `Cargo.toml` và `apps/desktop/package.json` cần khớp với tag.
+
+API được đóng gói cùng tài liệu vận hành; web BO gồm thư mục `dist` để phục vụ bằng web server. Các gói và release có SHA-256 checksums. Cấu hình triển khai và private keys được cung cấp riêng trên server; xem [SECURE-TRANSPORT.md](docs/SECURE-TRANSPORT.md) để đồng bộ public pins giữa API, desktop và web BO.
 
 ## Trạng thái
 Xem mục "Đã kiểm chứng / chưa kiểm chứng" trong `docs/TEST-PLAN.md` §1. Các tích hợp ngoài (SMTP, VNPAY LLM, Trino SSO, KMS) chưa được kiểm với hệ thống thật.

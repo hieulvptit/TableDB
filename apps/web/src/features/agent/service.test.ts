@@ -1,11 +1,14 @@
-import { describe, expect, it } from 'vitest';
+import { DEFAULT_RUNTIME } from './runtimeConfig';
+import { describe, expect, it, vi } from 'vitest';
 import type { AgentChatBody } from '@vnpay/shared';
 import type { AgentHttp, AgentHttpRequest } from './harness/bridge';
 import { parseRpc } from './harness/openmetadata';
 import { getPath, renderTemplate, toWire } from './harness/llm';
 import { AgentService, KEYS, extractSql, type AgentConfig, type SecretStore } from './service';
+import { PERSONAL_TEMPLATES } from './personalTemplates';
 
 const CONFIG: AgentConfig = {
+ runtime: DEFAULT_RUNTIME,
   endpoints: [{ id: 'gw', label: 'Gateway', baseUrl: 'https://genai.example.vn/v1', models: ['m1', 'm2'] }],
   defaultEndpointId: 'gw', defaultModel: 'm1', budgetChars: 12_000, openMetadataEnabled: true,
 };
@@ -19,11 +22,11 @@ const completion = (content: string) => JSON.stringify({ choices: [{ message: { 
 const ok = (body: string, extra: object = {}) => ({ status: 200, contentType: 'application/json', body, ...extra });
 
 interface Rig { svc: AgentService; secrets: ReturnType<typeof vault>; reqs: AgentHttpRequest[]; audits: Array<Record<string, unknown>> }
-function rig(handler: (r: AgentHttpRequest) => Promise<ReturnType<typeof ok>> | ReturnType<typeof ok>, config: AgentConfig = CONFIG): Rig {
+function rig(handler: (r: AgentHttpRequest, signal?: AbortSignal) => Promise<ReturnType<typeof ok>> | ReturnType<typeof ok>, config: AgentConfig = CONFIG): Rig {
   const secrets = vault();
   const reqs: AgentHttpRequest[] = [];
   const audits: Array<Record<string, unknown>> = [];
-  const http: AgentHttp = async (r) => { reqs.push(r); return handler(r); };
+  const http: AgentHttp = async (r, signal) => { reqs.push(r); return handler(r, signal); };
   return { svc: new AgentService({ http, config: async () => config, secrets, audit: (b) => audits.push(b) }), secrets, reqs, audits };
 }
 
@@ -83,6 +86,113 @@ describe('token and settings (local)', () => {
 });
 
 describe('chat (local harness)', () => {
+  it('runs a selected personal specialist through the provider without initializing disallowed OpenMetadata', async () => {
+    const template = PERSONAL_TEMPLATES[0]!;
+    let calls = 0;
+    const r = rig((request) => {
+      const messages = JSON.parse(request.body!).messages as Array<{ role: string; content: string }>;
+      expect(request.target.kind).toBe('llm');
+      expect(messages[0]!.content).not.toContain(template.agent.instructions);
+      if (++calls === 1) {
+        expect(messages[1]!.content).toContain(template.agent.instructions);
+        return ok(completion('```tool\n{"tool":"load_personal_skill","arguments":{"name":"personal:transaction-reconciliation"}}\n```'));
+      }
+      expect(messages.at(-1)!.content).toContain('DECIMAL/NUMERIC');
+      return ok(completion('Đây là quy trình đối soát.'));
+    });
+    await configured(r); r.secrets.data.set(KEYS.omMeta, '{"lastVerifiedAt":"x"}');
+    const result = await r.svc.chat(body({ personalSkills: [template.skill], personalAgents: [template.agent], agentName: template.agent.name }));
+    expect(result.reply).toBe('Đây là quy trình đối soát.');
+    expect(r.audits.at(-1)).toMatchObject({ personalAgent: 'reconciliation', personalSkillCount: 1 });
+    expect(r.reqs).toHaveLength(2);
+  });
+
+  it('rejects an unavailable selected specialist and does not apply profiles to summaries', async () => {
+    const template = PERSONAL_TEMPLATES[0]!;
+    const r = rig(() => ok(completion('summary'))); await configured(r);
+    await expect(r.svc.chat(body({ agentName: template.agent.name }))).rejects.toMatchObject({ code: 'VALIDATION' });
+    expect(r.reqs).toHaveLength(0);
+    await r.svc.chat(body({ plain: true, personalSkills: [template.skill], personalAgents: [template.agent], agentName: template.agent.name }));
+    expect(r.reqs[0]!.body).not.toContain(template.agent.instructions);
+    expect(r.reqs[0]!.body).not.toContain('load_personal_skill');
+  });
+  it('records first streamed text latency, LLM time and cumulative input size', async () => {
+    vi.useFakeTimers();
+    try {
+      const secrets = vault();
+      secrets.data.set(KEYS.llmMeta, '{"endpointId":"gw","model":"m1","lastVerifiedAt":"x"}');
+      const audits: Array<Record<string, unknown>> = [];
+      const first = 'data: {"choices":[{"index":0,"delta":{"content":"Xin "}}]}\n\n';
+      const last = 'data: {"choices":[{"index":0,"delta":{"content":"chào"}}]}\n\ndata: [DONE]\n\n';
+      const http: AgentHttp = async (_req, _signal, onChunk) => {
+        vi.advanceTimersByTime(20); onChunk?.(first);
+        vi.advanceTimersByTime(30);
+        return { status: 200, contentType: 'text/event-stream', body: first + last };
+      };
+      const svc = new AgentService({ http, secrets, config: async () => CONFIG, audit: (record) => audits.push(record) });
+      const live: string[] = [];
+      expect((await svc.chat(body(), undefined, undefined, (text) => live.push(text))).reply).toBe('Xin chào');
+      expect(live).toEqual(['Xin ', 'Xin chào']);
+      expect(audits.at(-1)?.timing).toMatchObject({ firstTextMs: 20, durationMs: 50, llmMs: 50 });
+      expect((audits.at(-1)?.timing as { inputChars: number }).inputChars).toBeGreaterThan(0);
+    } finally { vi.useRealTimers(); }
+  });
+  it('bounds OpenMetadata initialization by the whole-run deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      let pendingSignal: AbortSignal | undefined;
+      const r = rig((_q, signal) => { pendingSignal = signal; return new Promise(() => {}); }, {
+        ...CONFIG, runtime: { ...DEFAULT_RUNTIME, harness: { ...DEFAULT_RUNTIME.harness, deadlineMs: 50 } },
+      });
+      await configured(r); r.secrets.data.set(KEYS.omMeta, '{"lastVerifiedAt":"x"}');
+      const rejected = expect(r.svc.chat(body())).rejects.toThrow('deadline');
+      await vi.advanceTimersByTimeAsync(50); await rejected;
+      expect(pendingSignal?.aborted).toBe(true);
+      expect(r.reqs.every((q) => q.target.kind === 'om')).toBe(true);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('propagates cancellation into an OpenMetadata tool request', async () => {
+    const ctrl = new AbortController();
+    let toolSignal: AbortSignal | undefined;
+    const r = rig((q, signal) => {
+      if (q.target.kind === 'llm') return ok(completion('```tool\n{"tool":"search_metadata","arguments":{"q":"orders"}}\n```'));
+      const m = JSON.parse(q.body!) as { id: number; method: string };
+      if (m.method === 'tools/list') return ok(JSON.stringify({ id: m.id, result: { tools: [{ name: 'search_metadata' }] } }));
+      if (m.method === 'tools/call') {
+        toolSignal = signal; ctrl.abort();
+        return new Promise(() => {});
+      }
+      return ok(JSON.stringify({ id: m.id, result: {} }));
+    });
+    await configured(r); r.secrets.data.set(KEYS.omMeta, '{"lastVerifiedAt":"x"}');
+    await expect(r.svc.chat(body(), undefined, ctrl.signal)).rejects.toThrow('cancelled');
+    expect(toolSignal?.aborted).toBe(true);
+  });
+
+  it('reuses the MCP handshake/catalog briefly and invalidates on config, credential and TTL changes', async () => {
+    vi.useFakeTimers();
+    try {
+      const config = { ...CONFIG, openMetadataRevision: 'server-a' };
+      const r = rig((q) => {
+        if (q.target.kind === 'llm') return ok(completion('answer'));
+        const m = JSON.parse(q.body!) as { id: number; method: string };
+        return ok(JSON.stringify({ id: m.id, result: m.method === 'tools/list' ? { tools: [{ name: 'search_metadata' }] } : {} }));
+      }, config);
+      await configured(r); r.secrets.data.set(KEYS.omMeta, '{"lastVerifiedAt":"x"}');
+      const handshakes = () => r.reqs.filter((q) => q.target.kind === 'om' && JSON.parse(q.body!).method === 'initialize').length;
+      await r.svc.chat(body()); await r.svc.chat(body());
+      expect(handshakes()).toBe(1);
+      config.openMetadataRevision = 'server-b'; await r.svc.chat(body());
+      expect(handshakes()).toBe(2);
+      await vi.advanceTimersByTimeAsync(60_001); await r.svc.chat(body());
+      expect(handshakes()).toBe(3);
+      r.secrets.data.set(KEYS.omMeta, '{"lastVerifiedAt":"new"}'); await r.svc.chat(body());
+      expect(handshakes()).toBe(4);
+      await r.svc.deleteOmToken(); await r.svc.chat(body());
+      expect(handshakes()).toBe(4);
+    } finally { vi.useRealTimers(); }
+  });
   it('needs a stored token', async () => {
     await expect(rig(() => ok('{}')).svc.chat(body())).rejects.toMatchObject({ message: 'no LLM token configured' });
   });
@@ -220,4 +330,18 @@ describe('audit text', () => {
     expect(a).not.toContain('base64');
     expect(a).not.toContain('0912345678'); // masked SQL literal; phone redacted in Q&A
   });
+});
+
+it('uses server LLM parameters, timeout and Agent budget for a run', async () => {
+ const config = structuredClone(CONFIG);
+ config.runtime.llm.chat.body = { model: '{{model}}', messages: '{{allMessages}}', max_tokens: 1234, temperature: 0.7 };
+ config.runtime.llm.timeoutSec = 77;
+ config.runtime.harness.maxLlmCalls = 2;
+ config.runtime.harness.maxParallel = 1;
+ const r = rig(() => ok(completion('done')), config);
+ await configured(r);
+ await r.svc.chat(body({ useOpenMetadata: false }));
+ const request = r.reqs.find(x => x.target.kind === 'llm')!;
+ expect(JSON.parse(request.body!)).toMatchObject({ max_tokens: 1234, temperature: 0.7 });
+ expect(request.timeoutSec).toBe(77);
 });

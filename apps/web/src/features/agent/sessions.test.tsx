@@ -9,6 +9,18 @@ const chat = (id: string, title: string, over: Partial<ChatSession> = {}): ChatS
 
 describe('agent chats storage', () => {
   beforeEach(() => { localStorage.clear(); reloadWorkspaceForTests(); });
+  it('moves the summary boundary with evicted messages, including after reload', async () => {
+    saveChat(chat('long', 'Long chat', {
+      summary: 'covered through m189', summarized: 190,
+      messages: Array.from({ length: 205 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: `m${i}`, at: i })),
+    }));
+    await flushWorkspaceForTests();
+    reloadWorkspaceForTests();
+    const s = getChats()[0]!;
+    expect(s.messages).toHaveLength(200);
+    expect(s.summarized).toBe(185);
+    expect(s.messages[s.summarized]!.content).toBe('m190');
+  });
   it('persists sessions + memory, newest first with pinned on top, and drops malformed entries', async () => {
     saveChat(chat('a', 'Doanh thu', { updatedAt: 10 }));
     saveChat(chat('b', 'Lỗi giao dịch', { updatedAt: 20 }));

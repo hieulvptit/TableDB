@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math"
 	"math/rand/v2"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -80,14 +81,24 @@ func truncate(s string, n int) string {
 
 // RunOnce claims due jobs (crash-safe: running jobs whose lock expired are re-claimed), runs handlers, applies retry/dead-letter.
 func RunOnce(ctx context.Context, q db.Querier, handlers map[string]Handler, onDead DeadHandler, batch int) (ran, failed int, err error) {
-	if batch == 0 {
+	return runOnce(ctx, q, handlers, onDead, batch, 5*time.Minute, nil, false)
+}
+
+func runOnce(ctx context.Context, q db.Querier, handlers map[string]Handler, onDead DeadHandler, batch int, lease time.Duration, types []string, exclude bool) (ran, failed int, err error) {
+	if batch <= 0 {
+		batch = 10
+	}
+	// Every claimed job gets an execution slot immediately; never preclaim a
+	// larger batch and leave its leases expiring behind long-running handlers.
+	if batch > 10 {
 		batch = 10
 	}
 	rows, err := q.Query(ctx,
-		`UPDATE outbox SET state='running', attempts=attempts+1, locked_until=now() + interval '5 minutes', updated_at=now()
-		 WHERE id IN (SELECT id FROM outbox WHERE (state='pending' AND next_run_at <= now()) OR (state='running' AND locked_until < now())
+		`UPDATE outbox SET state='running', attempts=attempts+1, locked_until=now() + make_interval(secs => $2), updated_at=now()
+		 WHERE id IN (SELECT id FROM outbox WHERE ((state='pending' AND next_run_at <= now()) OR (state='running' AND locked_until < now()))
+ AND ($3::text[] IS NULL OR (type=ANY($3::text[])) <> $4)
 		              ORDER BY id LIMIT $1 FOR UPDATE SKIP LOCKED)
-		 RETURNING id, type, payload::text, attempts, max_attempts`, batch)
+		 RETURNING id, type, payload::text, attempts, max_attempts`, batch, lease.Seconds(), types, exclude)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -106,41 +117,87 @@ func RunOnce(ctx context.Context, q db.Querier, handlers map[string]Handler, onD
 	if err := rows.Err(); err != nil {
 		return 0, 0, err
 	}
-	// claimed rows are ordered by id only after the fact; keep Node's ORDER BY id semantics for the batch
-	sortJobs(claimed)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
 	for _, job := range claimed {
-		herr := runHandler(ctx, handlers, job)
-		if herr == nil {
-			if _, err := q.Exec(ctx, "UPDATE outbox SET state='done', last_error=NULL, updated_at=now() WHERE id=$1", job.ID); err != nil {
-				return len(claimed), failed, err
+		wg.Add(1)
+		go func(job Job) {
+			defer wg.Done()
+			didFail, jobErr := execute(ctx, q, handlers, onDead, job, lease)
+			mu.Lock()
+			defer mu.Unlock()
+			if didFail {
+				failed++
 			}
-			continue
-		}
-		failed++
-		msg := truncate(herr.Error(), 500) // messages come from our own adapters; never payloads/secrets
-		if job.Attempts >= job.MaxAttempts {
-			if _, err := q.Exec(ctx, "UPDATE outbox SET state='dead', last_error=$2, updated_at=now() WHERE id=$1", job.ID, msg); err != nil {
-				return len(claimed), failed, err
+			if err == nil {
+				err = jobErr
 			}
-			if onDead != nil {
-				onDead(ctx, job, herr)
-			}
-		} else {
-			secs := math.Round(BackoffSec(job.Attempts, nil))
-			if _, err := q.Exec(ctx, "UPDATE outbox SET state='pending', last_error=$2, next_run_at=now() + make_interval(secs => $3), updated_at=now() WHERE id=$1", job.ID, msg, secs); err != nil {
-				return len(claimed), failed, err
-			}
-		}
+		}(job)
 	}
-	return len(claimed), failed, nil
+	wg.Wait()
+	return len(claimed), failed, err
 }
 
-func sortJobs(js []Job) {
-	for i := 1; i < len(js); i++ {
-		for k := i; k > 0 && js[k].ID < js[k-1].ID; k-- {
-			js[k], js[k-1] = js[k-1], js[k]
+// Attempts increments atomically on claim and acts as the ownership generation:
+// a reclaimed job cannot be acknowledged or renewed by its previous worker.
+func execute(ctx context.Context, q db.Querier, handlers map[string]Handler, onDead DeadHandler, job Job, lease time.Duration) (bool, error) {
+	jobCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan struct{})
+	heartbeatDone := make(chan error, 1)
+	go func() {
+		tick := time.NewTicker(lease / 3)
+		defer tick.Stop()
+		for {
+			select {
+			case <-done:
+				heartbeatDone <- nil
+				return
+			case <-jobCtx.Done():
+				heartbeatDone <- jobCtx.Err()
+				return
+			case <-tick.C:
+				renewCtx, renewCancel := context.WithTimeout(jobCtx, lease/3)
+				tag, err := q.Exec(renewCtx, `UPDATE outbox SET locked_until=now() + make_interval(secs => $3)
+     WHERE id=$1 AND attempts=$2 AND state='running' AND locked_until > now()`, job.ID, job.Attempts, lease.Seconds())
+				renewCancel()
+				if err == nil && tag.RowsAffected() == 0 {
+					err = fmt.Errorf("job %d lease lost", job.ID)
+				}
+				if err != nil {
+					cancel()
+					heartbeatDone <- err
+					return
+				}
+			}
 		}
+	}()
+	herr := runHandler(jobCtx, handlers, job)
+	close(done)
+	if leaseErr := <-heartbeatDone; leaseErr != nil {
+		return false, leaseErr
 	}
+	if ctx.Err() != nil {
+		return false, ctx.Err()
+	}
+	// All result writes fence by generation and lease. Losing ownership leaves
+	// recovery to the current owner, even if an adapter ignored cancellation.
+	const owned = " WHERE id=$1 AND attempts=$2 AND state='running' AND locked_until > now()"
+	if herr == nil {
+		_, err := q.Exec(ctx, "UPDATE outbox SET state='done', last_error=NULL, updated_at=now()"+owned, job.ID, job.Attempts)
+		return false, err
+	}
+	msg := truncate(herr.Error(), 500)
+	if job.Attempts >= job.MaxAttempts {
+		tag, err := q.Exec(ctx, "UPDATE outbox SET state='dead', last_error=$3, updated_at=now()"+owned, job.ID, job.Attempts, msg)
+		if err == nil && tag.RowsAffected() == 1 && onDead != nil {
+			onDead(ctx, job, herr)
+		}
+		return true, err
+	}
+	secs := math.Round(BackoffSec(job.Attempts, nil))
+	_, err := q.Exec(ctx, "UPDATE outbox SET state='pending', last_error=$3, next_run_at=now() + make_interval(secs => $4), updated_at=now()"+owned, job.ID, job.Attempts, msg, secs)
+	return true, err
 }
 
 func runHandler(ctx context.Context, handlers map[string]Handler, job Job) (err error) {
@@ -177,27 +234,63 @@ func (w *Worker) Start(parent context.Context) {
 	if poll == 0 {
 		poll = 2 * time.Second
 	}
-	go func() {
-		defer close(w.done)
-		var lastSweep time.Time
-		t := time.NewTimer(500 * time.Millisecond)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-			}
-			if _, _, err := RunOnce(ctx, w.Q, w.Handlers, w.OnDead, 10); err != nil && ctx.Err() == nil {
-				slog.Error("worker tick failed", "err", err.Error())
-			}
-			if w.Sweep != nil && time.Since(lastSweep) > time.Minute {
-				lastSweep = time.Now()
-				w.Sweep(ctx)
-			}
-			t.Reset(poll)
+	// Independent lanes reserve capacity for notifications and cleanup even
+	// when every scan is slow. Each slot claims one job just before executing it.
+	lanes := []struct {
+		types   []string
+		slots   int
+		exclude bool
+	}{
+		{[]string{"scan", "rescan"}, 2, false},
+		{[]string{"email.approval", "email.decision", "email.quarantine"}, 4, false},
+		{[]string{"purge"}, 2, false},
+		{[]string{"scan", "rescan", "email.approval", "email.decision", "email.quarantine", "purge"}, 1, true},
+	}
+	var workers sync.WaitGroup
+	for _, lane := range lanes {
+		for i := 0; i < lane.slots; i++ {
+			workers.Add(1)
+			go func(types []string, exclude bool) {
+				defer workers.Done()
+				timer := time.NewTimer(500 * time.Millisecond)
+				defer timer.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-timer.C:
+					}
+					ran, _, err := runOnce(ctx, w.Q, w.Handlers, w.OnDead, 1, 5*time.Minute, types, exclude)
+					if err != nil && ctx.Err() == nil {
+						slog.Error("worker tick failed", "err", err.Error())
+					}
+					delay := poll
+					if ran > 0 && err == nil {
+						delay = 0
+					}
+					timer.Reset(delay)
+				}
+			}(lane.types, lane.exclude)
 		}
-	}()
+	}
+	if w.Sweep != nil {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			timer := time.NewTimer(500 * time.Millisecond)
+			defer timer.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-timer.C:
+				}
+				w.Sweep(ctx)
+				timer.Reset(time.Minute)
+			}
+		}()
+	}
+	go func() { workers.Wait(); close(w.done) }()
 }
 
 // Stop signals the loop and waits for the current tick to finish.

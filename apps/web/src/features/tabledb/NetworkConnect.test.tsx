@@ -1,3 +1,4 @@
+import { TEST_DB_CONFIG } from '../../test/dbConfig';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
@@ -41,6 +42,7 @@ beforeEach(() => {
     },
   };
   apiClient.configure({ desktop: false, baseUrl: '/api/v1', onStepUp: undefined, fetchImpl: (async (url: string, init: RequestInit) => {
+    if (url.endsWith('/db/config')) return json(TEST_DB_CONFIG);
     if (url.endsWith('/db/audit')) { audits.push(JSON.parse(init.body as string)); return json({ ok: true }, 201); }
     return json({ error: { code: 'NOT_FOUND', message: 'unmocked ' + url } }, 404);
   }) as unknown as typeof fetch });

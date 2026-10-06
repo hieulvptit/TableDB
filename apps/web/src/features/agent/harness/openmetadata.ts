@@ -3,6 +3,7 @@
 import { sanitizeField } from '@vnpay/shared';
 import { ApiError } from '../../../api/errors';
 import type { AgentHttp } from './bridge';
+import { DEFAULT_RUNTIME, type OpenMetadataConfig } from '../runtimeConfig';
 
 export interface McpTool { name: string; description?: string; inputSchema?: unknown }
 export interface McpSession {
@@ -11,11 +12,10 @@ export interface McpSession {
 }
 
 /** The only OpenMetadata tools the Agent may call. Anything else the server lists (create/patch/...) is never offered or executed. */
-export const OM_READONLY_TOOLS = ['search_metadata', 'get_entity_details', 'get_entity_lineage'];
-export const isReadonlyOM = (name: string) => OM_READONLY_TOOLS.includes(name);
-export const allowedOMTools = (listed: McpTool[]) => listed.filter((t) => isReadonlyOM(t.name));
+export const OM_READONLY_TOOLS = DEFAULT_RUNTIME.openMetadata.allowedTools;
+export const isReadonlyOM = (name: string, allowed = OM_READONLY_TOOLS) => allowed.includes(name);
+export const allowedOMTools = (listed: McpTool[], allowed = OM_READONLY_TOOLS) => listed.filter((t) => isReadonlyOM(t.name, allowed));
 
-const MCP_PROTOCOL = '2025-03-26';
 const upstream = (m: string) => new ApiError('UPSTREAM', m, 502);
 
 interface RpcMsg { id?: number | string; result?: unknown; error?: { message?: unknown } | null }
@@ -37,13 +37,13 @@ export function parseRpc(raw: string, contentType: string, id: number): RpcMsg {
 class HttpMcpSession implements McpSession {
   private sessionId = '';
   private nextId = 0;
-  constructor(private http: AgentHttp, private token?: string) {}
+  constructor(private http: AgentHttp, private token?: string, private config: OpenMetadataConfig = DEFAULT_RUNTIME.openMetadata) {}
 
   private async post(body: unknown, signal?: AbortSignal) {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'Mcp-Protocol-Version': MCP_PROTOCOL };
+    const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'Mcp-Protocol-Version': this.config.protocolVersion };
     if (this.sessionId) headers['Mcp-Session-Id'] = this.sessionId;
     let res;
-    try { res = await this.http({ target: { kind: 'om' }, method: 'POST', headers, body: JSON.stringify(body), timeoutSec: 30, ...(this.token ? { token: this.token } : {}) }, signal); }
+    try { res = await this.http({ target: { kind: 'om' }, method: 'POST', headers, body: JSON.stringify(body), timeoutSec: this.config.timeoutSec, ...(this.token ? { token: this.token } : {}) }, signal); }
     catch (e) { if (signal?.aborted) throw e; throw upstream('OpenMetadata MCP unreachable'); }
     if (res.status === 401 || res.status === 403) throw new ApiError('VALIDATION', 'OpenMetadata token rejected', 400);
     if (res.status < 200 || res.status > 299) throw upstream(`OpenMetadata MCP HTTP ${res.status}`);
@@ -63,7 +63,7 @@ class HttpMcpSession implements McpSession {
   }
 
   async init(signal?: AbortSignal) {
-    await this.rpc('initialize', { protocolVersion: MCP_PROTOCOL, capabilities: {}, clientInfo: { name: 'vnpay-tabledb', version: '1' } }, signal);
+    await this.rpc('initialize', { protocolVersion: this.config.protocolVersion, capabilities: {}, clientInfo: { name: 'vnpay-tabledb', version: '1' } }, signal);
     await this.post({ jsonrpc: '2.0', method: 'notifications/initialized' }, signal).catch(() => undefined); // best effort
   }
 
@@ -81,8 +81,8 @@ class HttpMcpSession implements McpSession {
 }
 
 /** Opens one MCP session (handshake included). `token` overrides the stored credential (validating a token before saving it). */
-export async function openMcp(http: AgentHttp, token?: string, signal?: AbortSignal): Promise<McpSession> {
-  const s = new HttpMcpSession(http, token);
+export async function openMcp(http: AgentHttp, token?: string, signal?: AbortSignal, config: OpenMetadataConfig = DEFAULT_RUNTIME.openMetadata): Promise<McpSession> {
+  const s = new HttpMcpSession(http, token, config);
   await s.init(signal);
   return s;
 }

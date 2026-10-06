@@ -1,3 +1,4 @@
+import { dbRuntimeConfig } from './runtimeConfig';
 import type { DriverType } from '@vnpay/shared';
 import { apiClient, type ApiClient } from '../../api/client';
 import { asList } from '../../api/services';
@@ -55,8 +56,8 @@ export function profileFromTarget(target: DbTarget, opts: { canWrite: boolean; s
       ssl: target.options?.ssl ?? true,
       readOnly: true,
       allowWrite: opts.canWrite && target.allowWrite,
-      ...(target.options?.connectTimeoutSec ? { connectTimeoutSec: target.options.connectTimeoutSec } : {}),
-      ...(opts.sso ? { externalAuthTimeoutSec: 180 } : {}),
+      connectTimeoutSec: target.options?.connectTimeoutSec ?? dbRuntimeConfig().connectTimeoutSec,
+      ...(opts.sso ? { externalAuthTimeoutSec: dbRuntimeConfig().externalAuthTimeoutSec } : {}),
       ...(target.proxy ? { proxy: target.proxy } : {}),
     },
   };

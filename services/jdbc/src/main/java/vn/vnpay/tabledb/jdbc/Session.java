@@ -23,6 +23,7 @@ public final class Session {
     public final ReentrantLock lock = new ReentrantLock();
     public final AtomicInteger active = new AtomicInteger();
     public final Map<String, Cursor> cursors = new ConcurrentHashMap<>();
+    public volatile boolean closed;
     public volatile long lastUsed = System.nanoTime();
     /** false = manual-commit mode (tx.setAutoCommit); guarded by {@link #lock} */
     public boolean autoCommit = true;
@@ -51,6 +52,8 @@ public final class Session {
     public boolean effectiveReadOnly() { return profile.readOnly || !profile.allowWrite; }
 
     public void close() {
+        if (closed) return;
+        closed = true;
         for (Cursor c : cursors.values()) c.close();
         cursors.clear();
         // an uncommitted manual transaction is rolled back, never committed implicitly (Oracle commits on close)

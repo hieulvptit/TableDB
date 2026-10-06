@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { Button, EmptyState, Spinner, cx, formatCell, useToast } from '@vnpay/ui';
 import { intlLocale, t } from '../../i18n';
 import { ChartPanel } from '../report/ChartPanel';
@@ -12,10 +12,10 @@ import { aggregate, inList, isBinary, matches, normRange, NUMERIC_TYPE, rangeTsv
 import { Rail, RailButton, RailSep } from './icons';
 import { CompareDialog, EditReviewDialog, ExportResultDialog, MessagesView, PlanView, ScriptLogView, ValueViewer } from './resultExtras';
 import { jsonLines, textLines } from './resultText';
-import { useTableDb } from './store';
+import { useTableDbSelector, type TableDbApi } from './store';
 import { deleteRowSql, insertRowSql, quoteIdent, sqlLiteral, updateRowSql, type ColType } from './tableSql';
 import type { TableRef } from './schemaStore';
-import type { EditorTabState, OutputState, ResultViewMode } from './types';
+import type { EditorTabState, OutputState, ResultTabState, ResultViewMode } from './types';
 
 const ROW_H = 28;          // grid row height (px) — rows are virtualized, so it must stay fixed (see .rv-table in app.css)
 const LINE_H = 18;         // JSON / Text line height (px)
@@ -107,7 +107,13 @@ function LinesView({ lines, first, last, label }: { lines: string[]; first: numb
  * columns, cell range selection + copy, value viewer, and in-place editing for table views with a primary key.
  */
 export function ResultPanel({ tab, output, emptyDescription, edit }: { tab: EditorTabState; output?: OutputState; emptyDescription?: string; edit?: EditCtx }) {
-  const db = useTableDb();
+  const resultTab = useMemo<ResultTabState>(() => ({ id: tab.id, connId: tab.connId, title: tab.title, outputs: tab.outputs, view: tab.view, kind: tab.kind, orderBy: tab.orderBy, table: tab.table, filter: tab.filter, schema: tab.schema, catalog: tab.catalog, maxRows: tab.maxRows }),
+    [tab.id, tab.connId, tab.title, tab.outputs, tab.view, tab.kind, tab.orderBy, tab.table, tab.filter, tab.schema, tab.catalog, tab.maxRows]);
+  return <ResultPanelBody tab={resultTab} output={output} emptyDescription={emptyDescription} edit={edit} />;
+}
+const resultState = (db: TableDbApi) => ({ connections: db.connections, loadMore: db.loadMore, refreshOutput: db.refreshOutput, loadAll: db.loadAll, setTableSort: db.setTableSort, setTableFilter: db.setTableFilter, patchOutput: db.patchOutput, updateTab: db.updateTab, setAgentRows: db.setAgentRows });
+const ResultPanelBody = memo(function ResultPanelBody({ tab, output, emptyDescription, edit }: { tab: ResultTabState; output?: OutputState; emptyDescription?: string; edit?: EditCtx }) {
+  const db = useTableDbSelector(resultState);
   const toast = useToast();
   const out: OutputState = output ?? { id: '', title: '', sql: '' };
   const outId = output?.id;
@@ -166,6 +172,7 @@ export function ResultPanel({ tab, output, emptyDescription, edit }: { tab: Edit
   const filtering = Object.values(filters).some((v) => v.trim());
 
   const lines = useMemo(() => {
+    if (view !== 'json' && view !== 'text') return [];
     const rows = order.map((i) => rowAt(i));
     return view === 'json' ? jsonLines(cols.map((c) => c.name), rows) : view === 'text' ? textLines(cols, rows) : [];
   }, [view, cols, order, rowAt]);
@@ -609,7 +616,7 @@ export function ResultPanel({ tab, output, emptyDescription, edit }: { tab: Edit
         onConfirm={() => { db.setAgentRows({ columns: cols.map((c) => c.name), rows: pickedRows }); setConsent(false); toast.push(t('rows.attached', { n: pickedRows.length }), 'success'); }} />
     </div>
   );
-}
+});
 
 const fmtNum = (n: number) => (Number.isInteger(n) ? n.toLocaleString(intlLocale()) : n.toLocaleString(intlLocale(), { maximumFractionDigits: 6 }));
 

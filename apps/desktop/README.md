@@ -33,31 +33,31 @@ Timeouts: `query.execute` = `timeoutSec`(+15 s), `session.open/test` cover `exte
 Sidecar stderr is logged after redaction; params/rows/SQL are never logged.
 
 Security posture: capability `default` grants only `core:event:allow-listen/unlisten`, the 10 app commands (each needs an explicit `allow-*` permission, enforced by `build.rs`),
-and updater check/install. No shell, fs, http, or opener permission for the WebView. CSP is `default-src 'self'` + `connect-src 'self' ipc: http://ipc.localhost <API origin>`;
-navigation of the main window is pinned to the app origin. The API must allow the WebView origin in CORS (`http://tauri.localhost` on Windows) and the SPA must not embed any login WebView.
+and updater check/install. No shell, fs, general HTTP, or opener permission for the WebView. CSP is `default-src 'self'` + `connect-src 'self' ipc: http://ipc.localhost <API origin>`;
+navigation of the main window is pinned to the app origin. Desktop API envelopes use a native HTTP bridge pinned to the configured API; the renderer cannot choose arbitrary destinations or plaintext routes. The SPA must not embed any login WebView.
 
 ## Configuration
 
 `%APPDATA%\vn.vnpay.tabledb\config.json` (a `config.sample.json` is dropped next to it on first run):
 
 ```json
-{ "env": "test", "apiBaseUrl": "https://tabledb-api.test.example.vn", "proxy": { "url": null }, "sidecar": { "maxHeapMb": 512 } }
+{ "env": "test", "apiBaseUrl": "http://10.23.5.40:8484" }
 ```
 
-Optional `genaiPersistSso` (bool, default `true`, env `TABLEDB_GENAI_PERSIST_SSO=0/1`): keeps the IdP (Google/Keycloak) cookies of the internal login window in a dedicated profile dir `<app_local_data_dir>/genai-login-webview`, like a browser profile, so the next login skips password/OTP. It is protected only by the OS user profile; set `false` on shared machines (the window is then incognito). Logout can wipe it via `genai_login_forget`. Optional `genaiLoginBrowser` (`"internal"` default | `"system"`, env `TABLEDB_GENAI_BROWSER`). Optional `genaiSecretPath` (system mode only) (bool, default `false`, env `TABLEDB_GENAI_SECRET_PATH=1`; enable only after genai validates connectid with a regex that allows `<port>/cb/<S>`). Optional `genaiLoginOrigins` (array of https origins, default `["https://genai.vnpay.vn"]`) is the allow-list for `genai_login_begin`'s `loginUrl` (e.g. a test broker).
+Deployment settings (SSO browser/origins/proxy/cookies/callback/timeout, general proxy, Java heap) are fetched by Rust from public `GET /api/v1/desktop/config` before sign-in, configured through server `DESKTOP_CONFIG`. The local equivalents and their TABLEDB_* env overrides are retained for old config parsing but do not override server deployment settings. Only local `proxy.url` may assist the bootstrap fetch. Restart the app to pick up deployment changes.
 
 Overrides: `TABLEDB_ENV`, `TABLEDB_API_BASE_URL`, `TABLEDB_PROXY_URL`. `env` (`test|prod`) namespaces the credential-manager service.
-`apiBaseUrl` is the SPA's API base; **it must equal the origin baked into the CSP at build time** (`-ApiOrigin`), otherwise the WebView blocks the calls
-(`app_info().cspAllowsApi` tells you). `proxy.url` is exposed via `app_info` for the SPA/updater (`check({proxy})`); the sidecar's DB/Trino proxy is per-profile
-(`profile.options.proxy`); the browser hops use the Windows proxy/PAC. Rust makes no HTTP calls itself.
+`apiBaseUrl` is the pinned API base. Rust sends the renderer's AES envelopes only to `/api/v1/secure/handshake` and `/api/v1/secure/request`; response chunks are read on demand so downloads remain streamed. API calls do not depend on WebView CORS, CSP exceptions, OS proxy settings, or `HTTP_PROXY`/`HTTPS_PROXY`. Without a configured API proxy, connections are direct. A configured proxy applies to remote API hosts; `localhost` and loopback IPs always connect directly.
+
+`proxy.url` is exposed via `app_info` for the updater (`check({proxy})`); the sidecar's DB/Trino proxy is per-profile (`profile.options.proxy`). Rust fetches desktop and Agent settings from the pinned API origin, and performs LLM/MCP calls.
 
 Logs: `%LOCALAPPDATA%\vn.vnpay.tabledb\logs\tabledb.log` (5 MB rotation, keep 5), every line passes through `redact.rs`
 (bearer/JWT, `password|token|secret|code_verifier…=` pairs, `code`/`state` URL params, URL userinfo).
 
 ## SSO proxy
 
-Deployment builds use the SSO-only proxy `http://10.23.5.189:3359` via
-`genaiProxyUrl` in `config.json` (override: `TABLEDB_GENAI_PROXY_URL`). This setting
+Server defaults use the SSO-only proxy `http://10.23.5.189:3359` via
+`genaiProxyUrl` in server `DESKTOP_CONFIG`. This setting
 does not route the TableDB API or JDBC connections through that proxy. Existing
 installations must add the setting to their existing config; new installations
 create `config.json` from the embedded deployment sample on first launch.
@@ -68,10 +68,12 @@ Manager, macOS Keychain, or Linux Secret Service (an unlocked desktop keyring is
 required on Linux). They are never included in config.json, source, CI logs or installers.
 
 The login screen automatically checks the proxy TCP port with a three-second timeout.
-The **Proxy** button is green when reachable and gray while checking or unreachable;
-click it to check again. The tooltip includes the result and latency. SSO is disabled
-until the TCP check succeeds, and the native core repeats the check before opening a
-browser or reading proxy credentials. A successful TCP check does not verify the
+The proxy indicator is an icon: green when reachable, orange while checking, and red
+when unreachable or the check fails. It is hidden when no proxy is configured. Click
+it to check again; its tooltip includes the result and latency. The status check
+does not disable SSO. The native core checks the proxy before reading credentials:
+if the proxy cannot be reached, login opens a direct connection without requiring
+proxy credentials or falling back to the general API proxy. A successful TCP check does not verify the
 proxy username/password or the remote SSO site.
 
 The app runs a loopback CONNECT bridge only for the active login session. It sends
@@ -144,8 +146,14 @@ and the relevant WebKitGTK runtime; Ubuntu/Debian packages are built separately 
 their respective distributions. The Windows installer can bootstrap WebView2 without
 internet; the app still needs access to its configured API and databases.
 
-This workflow uploads artifacts only; it does not publish GitHub Releases. Windows
-installers are unsigned, macOS apps are ad-hoc signed without notarization, and updater
+Builds of tags matching `desktop-v*` also publish installers to the matching GitHub
+Release after all five platform builds succeed. This includes manual workflow runs
+on those tags. Release asset filenames are prefixed with the platform artifact name
+to avoid collisions, and `SHA256SUMS.txt` covers all release installers. Re-running
+a tag build replaces assets with the same names in its existing release. Builds of
+`main` and pull requests only upload workflow artifacts.
+
+Windows installers are unsigned, macOS apps are ad-hoc signed without notarization, and updater
 artifacts are disabled. Production certificate signing can be added separately; the
 manual Windows script above still supports certificate/updater signing parameters.
 
@@ -163,3 +171,9 @@ Icons in `src-tauri/icons` are flat placeholders – replace with the brand icon
 
 ## Limits
 Secrets are protected at the Windows-account level only (see ARCHITECTURE section 9). Without a Job Object the sidecar can outlive a hard-killed app until it notices stdin EOF (it should exit on EOF).
+
+Agent endpoint/model lists and OpenMetadata settings come from authenticated `GET /api/v1/agent/config`, configured centrally with the server `AGENT_CONFIG` JSON environment variable (see `services/api/README.md`). Rust fetches and validates this config before using it for LLM/MCP requests. The legacy local `agent` section and `TABLEDB_OPENMETADATA_MCP_URL` do not override server settings. User LLM/MCP tokens remain in the OS credential store.
+
+`desktop_config()` loads and validates public deployment settings before login; `agent_config({accessToken})` fetches authenticated Agent settings through the Rust bridge. Full defaults and examples are in `services/api/README.md`. LLM sampling/token limits, mapping paths, request timeout, Agent budgets, HTTP byte/path/time limits, MCP tool list/protocol and memory thresholds are server-managed. Bootstrap origin/env, compiled CSP, app signing/identity and protocol validation bounds remain local.
+
+AES application transport, independent web/desktop keys and deployment settings: [SECURE-TRANSPORT.md](../../docs/SECURE-TRANSPORT.md).

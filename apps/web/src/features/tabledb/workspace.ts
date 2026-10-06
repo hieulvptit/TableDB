@@ -1,3 +1,4 @@
+import { PersonalSkill, PersonalAgent, MAX_PERSONAL_SKILLS, MAX_PERSONAL_AGENTS } from '@vnpay/shared';
 import { useEffect, useSyncExternalStore } from 'react';
 import { desktopCommands, isTauri } from '../../runtime/tauri';
 import { parseChartSpec, type ChartSpec } from '../report/chart';
@@ -47,14 +48,14 @@ export interface Snippet { id: string; name: string; sql: string; description?: 
 export interface Widget { id: string; name: string; sql: string; chart: ChartSpec; profileId?: string; connName?: string; schema?: string; catalog?: string; maxRows: number }
 export interface ChatMsg { role: 'user' | 'assistant'; content: string; at: number; model?: string; error?: boolean }
 /** One Agent conversation. Text only: never result rows, never metadata manifests. `summary` covers the first `summarized` messages. */
-export interface ChatSession { id: string; title: string; pinned?: boolean; connName?: string; profileId?: string; createdAt: number; updatedAt: number; summary?: string; summarized: number; messages: ChatMsg[] }
+export interface ChatSession { id: string; title: string; pinned?: boolean; connName?: string; profileId?: string; createdAt: number; updatedAt: number; summary?: string; summarized: number; messages: ChatMsg[]; agentName?: string }
 /** A fact the user wants the Agent to remember across conversations; sent with every message while `enabled`. */
 export interface MemoryNote { id: string; text: string; at: number; enabled: boolean }
 export const CONTEXT_KINDS = ['entity', 'terminology', 'filter', 'metric', 'gotcha'] as const;
 export type ContextKind = (typeof CONTEXT_KINDS)[number];
 /** Durable business knowledge about ONE saved connection (entity meanings, standard filters, metric formulas, gotchas). The user confirms every note; enabled ones ride with each Agent request for that profile. */
 export interface ContextNote { id: string; profileId: string; kind: ContextKind; text: string; at: number; enabled: boolean }
-interface Doc { v: 1; settings: WorkspaceSettings; tabs: SavedTab[]; history: HistoryEntry[]; snippets: Snippet[]; widgets: Widget[]; chats: ChatSession[]; memories: MemoryNote[]; contexts: ContextNote[] }
+interface Doc { v: 1; settings: WorkspaceSettings; tabs: SavedTab[]; history: HistoryEntry[]; snippets: Snippet[]; widgets: Widget[]; chats: ChatSession[]; memories: MemoryNote[]; contexts: ContextNote[]; personalSkills: PersonalSkill[]; personalAgents: PersonalAgent[] }
 
 const DEFAULT_SETTINGS: WorkspaceSettings = { persistTabs: true, recordHistory: true };
 const MAX_TAB_SQL = 2_000_000;
@@ -62,7 +63,7 @@ const MAX_TABS = 50;
 const MAX_HISTORY = 500;
 const MAX_WIDGETS = 60;
 const MAX_CHATS = 100;
-const MAX_CHAT_MSGS = 200;
+export const MAX_CHAT_MSGS = 200;
 const MAX_MEMORIES = 50;
 export const MAX_MEMORY_CHARS = 500;
 export const MAX_CONTEXT_CHARS = 300;
@@ -104,13 +105,16 @@ const cleanWidget = (x: unknown): Widget | null => {
 const num = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
 const cleanChat = (x: unknown): ChatSession | null => {
   if (!isObj(x) || typeof x.id !== 'string') return null;
-  const messages = arr(x.messages).filter(isObj).filter((m) => (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string').slice(-MAX_CHAT_MSGS).map((m): ChatMsg => ({
+  const validMessages = arr(x.messages).filter(isObj).filter((m) => (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string');
+  const dropped = Math.max(0, validMessages.length - MAX_CHAT_MSGS);
+  const messages = validMessages.slice(-MAX_CHAT_MSGS).map((m): ChatMsg => ({
     role: m.role as ChatMsg['role'], content: str(m.content, 20_000), at: num(m.at, 0), ...(typeof m.model === 'string' ? { model: m.model.slice(0, 100) } : {}), ...(m.error === true ? { error: true } : {}),
   }));
   const created = num(x.createdAt, 0);
   return {
+    ...(typeof x.agentName === 'string' && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(x.agentName) && x.agentName.length <= 48 ? { agentName: x.agentName } : {}),
     id: x.id.slice(0, 40), title: str(x.title, 120) || 'Chat', createdAt: created, updatedAt: num(x.updatedAt, created), messages,
-    summarized: Math.min(messages.length, Math.max(0, Math.trunc(num(x.summarized, 0)))),
+    summarized: Math.min(messages.length, Math.max(0, Math.trunc(num(x.summarized, 0)) - dropped)),
     ...(x.pinned === true ? { pinned: true } : {}), ...(typeof x.summary === 'string' && x.summary ? { summary: x.summary.slice(0, 4000) } : {}),
     ...(typeof x.connName === 'string' ? { connName: x.connName.slice(0, 100) } : {}), ...(typeof x.profileId === 'string' ? { profileId: x.profileId } : {}),
   };
@@ -121,6 +125,15 @@ const cleanMemory = (x: unknown): MemoryNote | null =>
 const cleanContext = (x: unknown): ContextNote | null =>
   isObj(x) && typeof x.id === 'string' && typeof x.profileId === 'string' && x.profileId && typeof x.text === 'string' && x.text.trim() && (CONTEXT_KINDS as readonly string[]).includes(x.kind as string)
     ? { id: x.id.slice(0, 40), profileId: x.profileId, kind: x.kind as ContextKind, text: x.text.replace(/\s+/g, ' ').trim().slice(0, MAX_CONTEXT_CHARS), at: num(x.at, 0), enabled: x.enabled !== false } : null;
+
+function cleanPersonalSkills(raw: unknown): PersonalSkill[] {
+  const seen = new Set<string>();
+  return arr(raw).flatMap((entry) => { const parsed = PersonalSkill.safeParse(entry); if (!parsed.success || seen.has(parsed.data.name)) return []; seen.add(parsed.data.name); return [parsed.data]; }).slice(0, MAX_PERSONAL_SKILLS);
+}
+function cleanPersonalAgents(raw: unknown): PersonalAgent[] {
+  const seen = new Set<string>();
+  return arr(raw).flatMap((entry) => { const parsed = PersonalAgent.safeParse(entry); if (!parsed.success || seen.has(parsed.data.name)) return []; seen.add(parsed.data.name); return [{ ...parsed.data, skills: [...new Set(parsed.data.skills)] }]; }).slice(0, MAX_PERSONAL_AGENTS);
+}
 
 /** Whitelist parse of a stored document (anything unknown or malformed is dropped). */
 function parseDoc(raw: unknown): Doc {
@@ -135,6 +148,8 @@ function parseDoc(raw: unknown): Doc {
     widgets: arr(d.widgets).map(cleanWidget).filter((w): w is Widget => !!w).slice(0, MAX_WIDGETS),
     chats: arr(d.chats).map(cleanChat).filter((c): c is ChatSession => !!c).slice(0, MAX_CHATS),
     memories: arr(d.memories).map(cleanMemory).filter((m): m is MemoryNote => !!m).slice(0, MAX_MEMORIES),
+    personalSkills: cleanPersonalSkills(d.personalSkills),
+    personalAgents: cleanPersonalAgents(d.personalAgents),
     contexts: arr(d.contexts).map(cleanContext).filter((c): c is ContextNote => !!c).slice(0, MAX_CONTEXTS),
   };
 }
@@ -147,6 +162,8 @@ const widgetsCell = new Cell<Widget[]>([]);
 const chatsCell = new Cell<ChatSession[]>([]);
 const memoriesCell = new Cell<MemoryNote[]>([]);
 const contextsCell = new Cell<ContextNote[]>([]);
+const personalSkillsCell = new Cell<PersonalSkill[]>([]);
+const personalAgentsCell = new Cell<PersonalAgent[]>([]);
 const readyCell = new Cell<boolean>(false);
 
 function apply(doc: Doc) {
@@ -158,8 +175,10 @@ function apply(doc: Doc) {
   chatsCell.set(doc.chats);
   memoriesCell.set(doc.memories);
   contextsCell.set(doc.contexts);
+  personalSkillsCell.set(doc.personalSkills);
+  personalAgentsCell.set(doc.personalAgents);
 }
-const snapshot = (): Doc => ({ v: 1, settings: settingsCell.get(), tabs: settingsCell.get().persistTabs ? tabsCell.get() : [], history: historyCell.get(), snippets: snippetsCell.get(), widgets: widgetsCell.get(), chats: chatsCell.get(), memories: memoriesCell.get(), contexts: contextsCell.get() });
+const snapshot = (): Doc => ({ v: 1, settings: settingsCell.get(), tabs: settingsCell.get().persistTabs ? tabsCell.get() : [], history: historyCell.get(), snippets: snippetsCell.get(), widgets: widgetsCell.get(), chats: chatsCell.get(), memories: memoriesCell.get(), contexts: contextsCell.get(), personalSkills: personalSkillsCell.get(), personalAgents: personalAgentsCell.get() });
 
 // ------------------------------------------------------------------ storage backends
 
@@ -343,6 +362,43 @@ export function saveMemory(m: MemoryNote): boolean {
 }
 export function deleteMemory(id: string) { memoriesCell.set(memoriesCell.get().filter((x) => x.id !== id)); persist(); }
 export const newMemoryId = () => `m${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
+// ------------------------------------------------------------------ personal skills and specialists (same encrypted workspace)
+export const usePersonalSkills = () => useSyncExternalStore(personalSkillsCell.subscribe, personalSkillsCell.get);
+export const usePersonalAgents = () => useSyncExternalStore(personalAgentsCell.subscribe, personalAgentsCell.get);
+export const getPersonalSkills = personalSkillsCell.get;
+export const getPersonalAgents = personalAgentsCell.get;
+export function savePersonalSkill(value: PersonalSkill): boolean {
+  const parsed = PersonalSkill.safeParse(value);
+  if (!parsed.success) return false;
+  const cur = personalSkillsCell.get(), skill = parsed.data;
+  const exists = cur.some((s) => s.name === skill.name);
+  if (!exists && cur.length >= MAX_PERSONAL_SKILLS) return false;
+  personalSkillsCell.set(exists ? cur.map((s) => s.name === skill.name ? skill : s) : [...cur, skill]);
+  persist(); return true;
+}
+export function savePersonalAgent(value: PersonalAgent): boolean {
+  const parsed = PersonalAgent.safeParse(value);
+  if (!parsed.success) return false;
+  const cur = personalAgentsCell.get(), agent = { ...parsed.data, skills: [...new Set(parsed.data.skills)] };
+  const exists = cur.some((s) => s.name === agent.name);
+  if (!exists && cur.length >= MAX_PERSONAL_AGENTS) return false;
+  personalAgentsCell.set(exists ? cur.map((s) => s.name === agent.name ? agent : s) : [...cur, agent]);
+  persist(); return true;
+}
+export function installPersonalTemplate(skill: PersonalSkill, agent: PersonalAgent): boolean {
+  const s = PersonalSkill.safeParse(skill), a = PersonalAgent.safeParse(agent);
+  if (!s.success || !a.success || personalSkillsCell.get().length >= MAX_PERSONAL_SKILLS || personalAgentsCell.get().length >= MAX_PERSONAL_AGENTS || personalSkillsCell.get().some((x) => x.name === skill.name) || personalAgentsCell.get().some((x) => x.name === agent.name)) return false;
+  personalSkillsCell.set([...personalSkillsCell.get(), s.data]);
+  personalAgentsCell.set([...personalAgentsCell.get(), a.data]);
+  persist(); return true;
+}
+export function deletePersonalSkill(name: string) {
+  personalSkillsCell.set(personalSkillsCell.get().filter((s) => s.name !== name));
+  personalAgentsCell.set(personalAgentsCell.get().map((a) => ({ ...a, skills: a.skills.filter((s) => s !== `personal:${name}`) })));
+  persist();
+}
+export function deletePersonalAgent(name: string) { personalAgentsCell.set(personalAgentsCell.get().filter((a) => a.name !== name)); persist(); }
 
 // ------------------------------------------------------------------ business context per saved connection
 export const useContextNotes = () => useSyncExternalStore(contextsCell.subscribe, contextsCell.get);

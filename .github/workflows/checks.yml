@@ -1,0 +1,74 @@
+name: Application checks
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/web/**'
+      - 'services/web/**'
+      - 'services/api/**'
+      - 'packages/**'
+      - 'scripts/generate-secure-browser-client.cjs'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig.base.json'
+      - '.github/workflows/checks.yml'
+  pull_request:
+    paths:
+      - 'apps/web/**'
+      - 'services/web/**'
+      - 'services/api/**'
+      - 'packages/**'
+      - 'scripts/generate-secure-browser-client.cjs'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig.base.json'
+      - '.github/workflows/checks.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: application-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend tests and builds
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: services/api/go.mod
+          cache-dependency-path: services/api/go.sum
+      - run: npm ci
+      - name: Verify embedded browser transport
+        run: |
+          node scripts/generate-secure-browser-client.cjs
+          git diff --exit-code -- services/api/internal/securetransport/browser-client.js
+      - run: npm run typecheck
+      - run: npm run test:frontend
+      - run: npm run build:desktop --workspace @vnpay/web
+      - run: npm run build --workspace @vnpay/web-bo
+
+  api:
+    name: API tests
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: services/api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: services/api/go.mod
+          cache-dependency-path: services/api/go.sum
+      - run: go test -race ./...

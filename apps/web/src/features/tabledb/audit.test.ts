@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/errors';
-import { AuditReporter, toWireBody, type QueryAudit } from './audit';
+import { AuditReporter, toWireBody, type QueryAudit, type ActivityAudit } from './audit';
 
 const q = (o: Partial<QueryAudit> = {}): QueryAudit => ({ targetId: 't1', mode: 'read', kind: 'read', sql: 'SELECT 1', ok: true, rows: 1, ms: 5, ...o });
 beforeEach(() => vi.useFakeTimers());
@@ -90,5 +90,13 @@ describe('AuditReporter', () => {
   it('never throws into the caller, even with a hostile record', () => {
     const r = new AuditReporter({ send: async () => ({}) });
     expect(() => r.report(null as never)).not.toThrow();
+  });
+});
+
+describe('activity audit whitelist', () => {
+  it('reports source and export counts without rows, credentials or file content', () => {
+    const input = { targetId: 't1', event: 'export', ok: true, schema: 'public', table: 'orders', catalog: 'app', format: 'xlsx', scope: 'selection', rows: 2, data: [['secret']], token: 'secret', filename: 'secret.xlsx' } as unknown as ActivityAudit;
+    expect(toWireBody(input)).toEqual({ targetId: 't1', event: 'export', ok: true, schema: 'public', table: 'orders', catalog: 'app', format: 'xlsx', scope: 'selection', rows: 2 });
+    expect(toWireBody({ ...input, rows: [] as unknown as number })).not.toHaveProperty('rows');
   });
 });
