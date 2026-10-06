@@ -20,12 +20,12 @@ JDBC = ROOT / "services/jdbc/target"
 def api_origin():
     origin = os.environ.get("API_ORIGIN", "").strip()
     parsed = urlsplit(origin)
-    # Accept an origin only: no path, credentials, query, fragment or whitespace.
+    # Allow a deployment path prefix, but never credentials, query or fragment.
     if (parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username is not None
-            or parsed.password is not None or parsed.path or parsed.query or parsed.fragment
+            or parsed.password is not None or parsed.query or parsed.fragment
             or any(c.isspace() or c in ";'\"<>\\" for c in origin)
-            or origin != f"{parsed.scheme}://{parsed.netloc}"):
-        raise ValueError("API origin must be http(s)://host[:port] without a path or credentials")
+            or origin != f"{parsed.scheme}://{parsed.netloc}{parsed.path}"):
+        raise ValueError("API base URL must be http(s)://host[:port][/prefix/] without credentials, query or fragment")
     parsed.port  # Also reject malformed ports.
     if parsed.scheme == "http":
         try:
@@ -45,7 +45,9 @@ def sha256(path):
 
 
 def prepare():
-    origin = api_origin()
+    base_url = api_origin()
+    parsed = urlsplit(base_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
     jar = JDBC / "tabledb-jdbc.jar"
     drivers = JDBC / "drivers"
     manifest = json.loads((drivers / "manifest.json").read_text(encoding="utf-8"))
@@ -101,7 +103,7 @@ def prepare():
     (DESKTOP / "tauri.ci.json").write_text(json.dumps(override), encoding="utf-8")
     sample_path = TAURI / "config.sample.json"
     sample = json.loads(sample_path.read_text(encoding="utf-8"))
-    sample["apiBaseUrl"] = origin
+    sample["apiBaseUrl"] = base_url
     if os.environ.get("TABLEDB_SERVER_SIGNING_PUBLIC_KEY"):
         sample["serverSigningPublicKey"] = os.environ["TABLEDB_SERVER_SIGNING_PUBLIC_KEY"]
     sample_path.write_text(json.dumps(sample, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

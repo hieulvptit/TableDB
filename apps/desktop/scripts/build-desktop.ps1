@@ -3,7 +3,7 @@
 .DESCRIPTION
   Produces src-tauri\target\release\bundle\nsis\*.exe (+ .sig / latest.json inputs when updater signing is configured).
   The CSP in tauri.conf.json is static, so the API origin is injected here via a generated --config override.
-.PARAMETER ApiOrigin        e.g. https://tabledb-api.vnpay.vn   (REQUIRED: becomes the only extra connect-src origin)
+.PARAMETER ApiOrigin        API base URL, e.g. http://10.23.5.40:8080/c/ (optional deployment path prefix)
 .PARAMETER UpdaterPubkey    Public key from `tauri signer generate` (contents of the .pub file). Enables updater artifacts together with
                             $env:TAURI_SIGNING_PRIVATE_KEY (+ TAURI_SIGNING_PRIVATE_KEY_PASSWORD).
 .PARAMETER UpdaterEndpoint  https URL template of the update manifest, e.g. https://updates.vnpay.vn/tabledb/{{target}}-{{arch}}/{{current_version}}
@@ -22,17 +22,32 @@ param(
 $ErrorActionPreference = 'Stop'
 $desk = Resolve-Path (Join-Path $PSScriptRoot '..')
 $web = Resolve-Path (Join-Path $desk '..\web')
-if ($ApiOrigin -notmatch '^https://[^/\s]+$') { throw 'ApiOrigin must be https://host[:port] with no path' }
+$apiUri = $null
+if (-not [Uri]::TryCreate($ApiOrigin, [UriKind]::Absolute, [ref]$apiUri) -or
+    $apiUri.Scheme -notin @('http', 'https') -or -not $apiUri.Host -or
+    $apiUri.UserInfo -or $apiUri.Query -or $apiUri.Fragment -or $ApiOrigin -match '[\s;''"<>\\]') {
+  throw 'ApiOrigin must be an HTTP(S) API base URL without credentials, query or fragment'
+}
+if ($apiUri.Scheme -eq 'http') {
+  $apiIp = $null
+  $privateIp = $false
+  if ([Net.IPAddress]::TryParse($apiUri.Host, [ref]$apiIp) -and $apiIp.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork) {
+    $octets = $apiIp.GetAddressBytes()
+    $privateIp = $octets[0] -eq 10 -or ($octets[0] -eq 172 -and $octets[1] -ge 16 -and $octets[1] -le 31) -or ($octets[0] -eq 192 -and $octets[1] -eq 168)
+  }
+  if (-not $apiUri.IsLoopback -and -not $privateIp) { throw 'HTTP API base URL must use loopback or a private IP' }
+}
+$apiCspOrigin = $apiUri.GetLeftPart([UriPartial]::Authority)
 
 if (-not $SkipJre)     { & (Join-Path $PSScriptRoot 'build-jre.ps1') }
 if (-not $SkipSidecar) { & (Join-Path $PSScriptRoot 'stage-sidecar.ps1') }
 if (-not $SkipWeb) {
   Push-Location $web
-  try { npm ci; if ($LASTEXITCODE) { throw 'npm ci failed' }; npm run build; if ($LASTEXITCODE) { throw 'web build failed' } } finally { Pop-Location }
+  try { npm ci; if ($LASTEXITCODE) { throw 'npm ci failed' }; npm run build:desktop; if ($LASTEXITCODE) { throw 'desktop frontend build failed' } } finally { Pop-Location }
 }
 if (-not (Test-Path (Join-Path $web 'dist\index.html'))) { throw 'apps/web/dist/index.html missing' }
 
-$csp = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost $ApiOrigin; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+$csp = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost $apiCspOrigin; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 $override = @{ app = @{ security = @{ csp = $csp } }; bundle = @{ windows = @{} } }
 if ($CertThumbprint) {
   $override.bundle.windows = @{ certificateThumbprint = $CertThumbprint; digestAlgorithm = 'sha256'; timestampUrl = $TimestampUrl }

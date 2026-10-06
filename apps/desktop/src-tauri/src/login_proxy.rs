@@ -399,7 +399,7 @@ mod tests {
         }
         for target in [
             "127.0.0.1:443",
-            "10.23.5.40:8484",
+            "10.23.5.40:8080",
             "example.com:443",
             "accounts.google.com.evil.com:443",
             "accounts.google.com:80",

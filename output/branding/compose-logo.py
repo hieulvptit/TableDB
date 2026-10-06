@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 root = Path(__file__).resolve().parents[2]
 ET.register_namespace('', 'http://www.w3.org/2000/svg')
 brand = ET.parse(root / 'output/branding/vnpay-official.svg').getroot()
-db = ET.parse(root / 'apps/web/public/tabledb-logo.svg').getroot()
+db = ET.parse(root / 'output/branding/tabledb-original.svg').getroot()
 serialize = lambda el: ET.tostring(el, encoding='unicode')
 paths = brand.findall('{http://www.w3.org/2000/svg}path')
 brand_defs = serialize(brand.find('{http://www.w3.org/2000/svg}defs'))

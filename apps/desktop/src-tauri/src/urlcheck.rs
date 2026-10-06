@@ -87,7 +87,7 @@ mod tests {
 
     #[test]
     fn api_accepts_private_http_without_relaxing_auth_endpoints() {
-        for endpoint in ["http://10.23.5.40:8484", "http://172.16.0.1", "http://192.168.1.1"] {
+        for endpoint in ["http://10.23.5.40:8080/c/", "http://172.16.0.1", "http://192.168.1.1"] {
             assert!(validate_api_endpoint(endpoint).is_ok());
             assert!(validate_endpoint(endpoint).is_err());
         }

@@ -13,8 +13,8 @@
     "withGlobalTauri": false,
     "windows": [],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost http://10.23.5.40:8484; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src agent-sandbox: http://agent-sandbox.localhost; frame-ancestors 'none'",
-      "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ipc: http://ipc.localhost ws://localhost:5173 http://localhost:5173 http://localhost:3000 http://10.23.5.40:8484; frame-src 'self' agent-sandbox: http://agent-sandbox.localhost",
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost http://10.23.5.40:8080; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src agent-sandbox: http://agent-sandbox.localhost; frame-ancestors 'none'",
+      "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ipc: http://ipc.localhost ws://localhost:5173 http://localhost:5173 http://localhost:3000 http://10.23.5.40:8080; frame-src 'self' agent-sandbox: http://agent-sandbox.localhost",
       "freezePrototype": false
     }
   },

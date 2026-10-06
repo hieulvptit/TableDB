@@ -41,7 +41,7 @@ navigation of the main window is pinned to the app origin. Desktop API envelopes
 `%APPDATA%\vn.vnpay.tabledb\config.json` (a `config.sample.json` is dropped next to it on first run):
 
 ```json
-{ "env": "test", "apiBaseUrl": "http://10.23.5.40:8484" }
+{ "env": "test", "apiBaseUrl": "http://10.23.5.40:8080/c/" }
 ```
 
 Deployment settings (SSO browser/origins/proxy/cookies/callback/timeout, general proxy, Java heap) are fetched by Rust from public `GET /api/v1/desktop/config` before sign-in, configured through server `DESKTOP_CONFIG`. The local equivalents and their TABLEDB_* env overrides are retained for old config parsing but do not override server deployment settings. Only local `proxy.url` may assist the bootstrap fetch. Restart the app to pick up deployment changes.
@@ -125,9 +125,9 @@ jdk.unsupported, jdk.httpserver, jdk.crypto.ec, jdk.naming.dns` (modules missing
 | `tabledb-ubuntu-x64` | Ubuntu 22.04 container, x64 | `.deb`, `.AppImage` |
 | `tabledb-debian-x64` | Debian 12 container, x64 | `.deb` |
 
-The default deployment API is `http://10.23.5.40:8484`. To override it, set
+The default deployment API is `http://10.23.5.40:8080/c/`. To override it, set
 **Settings → Secrets and variables → Actions → Variables → `TABLEDB_API_ORIGIN`**
-to the API origin (no trailing slash or path). HTTPS is accepted for any host;
+to the API base URL (an optional path prefix such as `/c/` is supported). HTTPS is accepted for any host;
 HTTP is accepted for localhost, loopback IPs and RFC1918 private IPv4 addresses.
 Then choose **Actions → Desktop builds → Run workflow**. The optional `api_origin`
 input overrides the repository variable for that run. Pushes to `main`, tags matching
