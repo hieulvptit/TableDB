@@ -35,6 +35,8 @@ Workflow `.github/workflows/desktop-build.yml` build Desktop (Windows, macOS, Ub
 
 API được đóng gói cùng tài liệu vận hành; web BO gồm thư mục `dist` để phục vụ bằng web server. Các gói và release có SHA-256 checksums. Cấu hình triển khai và private keys được cung cấp riêng trên server; xem [SECURE-TRANSPORT.md](docs/SECURE-TRANSPORT.md) để đồng bộ public pins giữa API, desktop và web BO.
 
+Nếu các build đã thành công nhưng bước xuất bản lỗi, chạy workflow `Publish built release` với `build_run_id` của lần build và `release_tag` tương ứng. Workflow kiểm tra commit của tag và kết quả từng build trước khi xác minh checksum và xuất bản các artifact có sẵn.
+
 ## Trạng thái
 Xem mục "Đã kiểm chứng / chưa kiểm chứng" trong `docs/TEST-PLAN.md` §1. Các tích hợp ngoài (SMTP, VNPAY LLM, Trino SSO, KMS) chưa được kiểm với hệ thống thật.
 

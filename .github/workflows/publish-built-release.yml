@@ -1,0 +1,95 @@
+name: Publish built release
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: 'Desktop and service builds run containing the completed packages'
+        required: true
+        type: string
+      release_tag:
+        description: 'Existing desktop release tag matching the build commit'
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: publish-release-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BUILD_RUN_ID: ${{ inputs.build_run_id }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify build source and completed jobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$BUILD_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$RELEASE_TAG" =~ ^desktop-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          git rev-parse "refs/tags/$RELEASE_TAG^{commit}" > expected-commit.txt
+          gh api "repos/$GH_REPO/actions/runs/$BUILD_RUN_ID" > build-run.json
+          gh api --paginate --slurp "repos/$GH_REPO/actions/runs/$BUILD_RUN_ID/jobs?filter=latest&per_page=100" > build-jobs.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          run = json.loads(Path('build-run.json').read_text())
+          expected = Path('expected-commit.txt').read_text().strip()
+          assert run['head_sha'] == expected, 'Build commit does not match the release tag'
+          assert run['path'] == '.github/workflows/desktop-build.yml', 'Unexpected build workflow'
+          assert run['status'] == 'completed', 'Build run is still active'
+          jobs = {job['name']: job for page in json.loads(Path('build-jobs.json').read_text()) for job in page['jobs']}
+          required = [
+              'Frontend and JDBC sidecar', 'API service (linux x64)',
+              'API service (windows x64)', 'Web BO package', 'Windows x64',
+              'macOS Apple Silicon', 'macOS Intel',
+              'Ubuntu 22.04 x64 (DEB and AppImage)', 'Debian 12 x64 (DEB)',
+          ]
+          for name in required:
+              assert name in jobs and jobs[name]['conclusion'] == 'success', f'Build incomplete: {name}'
+          print('Verified completed builds for', expected)
+          PY
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tabledb-*
+          path: built-artifacts
+          merge-multiple: false
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.build_run_id }}
+      - name: Verify and prepare release packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          for platform in windows-x64 macos-arm64 macos-x64 ubuntu-x64 debian-x64 api-linux-x64 api-windows-x64 web-bo; do
+            artifact="tabledb-$platform"
+            directory="built-artifacts/$artifact"
+            (cd "$directory" && sed -i 's/\r$//' SHA256SUMS.txt && sha256sum --check SHA256SUMS.txt)
+            for file in "$directory"/*; do
+              [[ "$(basename "$file")" == SHA256SUMS.txt ]] && continue
+              cp "$file" "release-assets/$artifact-$(basename "$file")"
+            done
+          done
+          (cd release-assets && sha256sum -- * > SHA256SUMS.txt)
+      - name: Publish packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-assets/* --clobber
+          else
+            gh release create "$RELEASE_TAG" release-assets/* \
+              --verify-tag --title "$RELEASE_TAG" --generate-notes
+          fi
