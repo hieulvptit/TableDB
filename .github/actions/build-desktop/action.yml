@@ -56,7 +56,7 @@ runs:
         BUILD_TARGET: ${{ inputs.target }}
         BUILD_BUNDLES: ${{ inputs.bundles }}
         APPLE_SIGNING_IDENTITY: '-'
-      run: npx --no-install tauri build --target "$BUILD_TARGET" --bundles "$BUILD_BUNDLES" --config "$GITHUB_WORKSPACE/apps/desktop/tauri.ci.json"
+      run: npx --no-install tauri build --verbose --target "$BUILD_TARGET" --bundles "$BUILD_BUNDLES" --config "$GITHUB_WORKSPACE/apps/desktop/tauri.ci.json"
     - name: Collect installers and SHA-256 checksums
       shell: bash
       env:
