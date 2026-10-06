@@ -56,7 +56,21 @@ runs:
         BUILD_TARGET: ${{ inputs.target }}
         BUILD_BUNDLES: ${{ inputs.bundles }}
         APPLE_SIGNING_IDENTITY: '-'
-      run: npx --no-install tauri build --verbose --target "$BUILD_TARGET" --bundles "$BUILD_BUNDLES" --config "$GITHUB_WORKSPACE/apps/desktop/tauri.ci.json"
+      run: |
+        if [[ "$BUILD_TARGET" == *-linux-* && ",$BUILD_BUNDLES," == *,appimage,* ]]; then
+          # linuxdeploy scans the bundled JRE; JNI libraries depend on libjvm.so
+          # in lib/server, which is outside the system linker search path.
+          JRE_LIB="$GITHUB_WORKSPACE/apps/desktop/src-tauri/resources/jre/lib"
+          test -f "$JRE_LIB/server/libjvm.so"
+          export LD_LIBRARY_PATH="$JRE_LIB/server:$JRE_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        fi
+        npx --no-install tauri build --verbose --target "$BUILD_TARGET" --bundles "$BUILD_BUNDLES" --config "$GITHUB_WORKSPACE/apps/desktop/tauri.ci.json"
+    - name: Verify bundled AppImage JRE and JDBC sidecar
+      if: runner.os == 'Linux' && contains(inputs.bundles, 'appimage')
+      shell: bash
+      env:
+        BUILD_TARGET: ${{ inputs.target }}
+      run: python .github/scripts/desktop-ci.py verify-appimage
     - name: Collect installers and SHA-256 checksums
       shell: bash
       env:

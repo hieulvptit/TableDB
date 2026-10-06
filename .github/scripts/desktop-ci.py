@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -104,6 +105,26 @@ def prepare():
     sample_path.write_text(json.dumps(sample, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def verify_appimage():
+    bundle = TAURI / "target" / os.environ["BUILD_TARGET"] / "release/bundle/appimage"
+    images = list(bundle.glob("*.AppImage"))
+    if len(images) != 1:
+        raise ValueError(f"Expected one AppImage in {bundle}, found {len(images)}")
+    config = json.loads((TAURI / "tauri.conf.json").read_text(encoding="utf-8"))
+    with tempfile.TemporaryDirectory(prefix="tabledb-appimage-") as directory:
+        subprocess.run([str(images[0]), "--appimage-extract"], cwd=directory,
+                       stdout=subprocess.DEVNULL, check=True, timeout=120)
+        resources = Path(directory) / "squashfs-root/usr/lib" / config["productName"] / "resources"
+        java = resources / "jre/bin/java"
+        sidecar = resources / "sidecar"
+        # Check the relocated JRE without the linker paths used during packaging.
+        env = dict(os.environ)
+        env.pop("LD_LIBRARY_PATH", None)
+        subprocess.run([str(java), "-version"], env=env, check=True, timeout=30)
+        subprocess.run([str(java), "-jar", str(sidecar / "tabledb-jdbc.jar"), "--stdio"],
+                       input=b"", cwd=sidecar, env=env, check=True, timeout=30)
+
+
 def collect():
     bundle = TAURI / "target" / os.environ["BUILD_TARGET"] / "release/bundle"
     output = ROOT / "desktop-artifacts"
@@ -124,5 +145,5 @@ def collect():
 
 
 if __name__ == "__main__":
-    commands = {"validate": api_origin, "prepare": prepare, "collect": collect}
+    commands = {"validate": api_origin, "prepare": prepare, "verify-appimage": verify_appimage, "collect": collect}
     commands[sys.argv[1]]()
