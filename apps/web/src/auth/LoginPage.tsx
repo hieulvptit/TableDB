@@ -49,13 +49,17 @@ export default function LoginPage() {
   return (
     <div className="login-page">
       <div className="ui-card nt-card login-card">
+        {desktop && <img src="/tabledb-logo.svg" alt="" width="72" height="72" />}
         <h1>VNPAY {t(desktop ? 'brand.desktop' : 'brand.web')}</h1>
         {stepup && <p className="ui-muted">{t('login.stepup')}</p>}
-        <AsyncView state={cfg}>{(c: AuthConfig) => GenaiLoginPanel && desktop && c.desktopLoginUrl ? (
+        {GenaiLoginPanel && desktop && (
           <Suspense fallback={null}>
-            <GenaiLoginPanel loginUrl={c.desktopLoginUrl} onDone={async () => { await refresh({ strict: true }); nav(returnTo, { replace: true }); }} />
+            <GenaiLoginPanel loginUrl={cfg.data?.desktopLoginUrl ?? null}
+              api={{ loading: cfg.loading, error: cfg.error, ready: !!cfg.data, baseUrl: apiClient.baseUrl, retry: cfg.reload }}
+              onDone={async () => { await refresh({ strict: true }); nav(returnTo, { replace: true }); }} />
           </Suspense>
-        ) : (
+        )}
+        <AsyncView state={cfg}>{(c: AuthConfig) => GenaiLoginPanel && desktop && c.desktopLoginUrl ? null : (
           <div className="ui-col">
             {c.providers.map((p) => (
               <Button key={p.id} variant="primary" onClick={() => void signIn(p.id)} loading={busy === p.id} disabled={!!busy}>{t('login.with', { name: p.label })}</Button>

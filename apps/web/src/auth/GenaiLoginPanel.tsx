@@ -6,9 +6,17 @@ import { desktopCommands } from '../runtime/tauri';
 
 type Phase = 'idle' | 'waiting' | 'exchanging';
 type ProxyStatus = 'checking' | 'reachable' | 'unreachable' | 'none' | 'error';
+interface ApiStatus { loading: boolean; error: string; ready: boolean; baseUrl: string; retry: () => void }
+
+function ConnectionIcon({ state }: { state: 'checking' | 'ok' | 'error' | 'none' }) {
+  return <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+    <circle cx="12" cy="12" r="9" />
+    {state === 'ok' ? <path d="m7 12 3 3 7-7" /> : state === 'error' ? <path d="m8 8 8 8m0-8-8 8" /> : state === 'checking' ? <path d="M12 6v6l4 2" /> : <path d="M7 12h10" />}
+  </svg>;
+}
 
 /** Desktop-only: single "VNPAY SSO" button (broker flow) with a waiting state and cancel. */
-export default function GenaiLoginPanel({ loginUrl, onDone }: { loginUrl: string; onDone: () => Promise<void> | void }) {
+export default function GenaiLoginPanel({ loginUrl, onDone, api }: { loginUrl: string | null; onDone: () => Promise<void> | void; api?: ApiStatus }) {
   const toast = useToast();
   const [phase, setPhase] = useState<Phase>('idle');
   const running = useRef(false);
@@ -51,7 +59,7 @@ export default function GenaiLoginPanel({ loginUrl, onDone }: { loginUrl: string
   };
 
   const start = async () => {
-    if (running.current || !['reachable', 'none'].includes(proxyStatus)) return;
+    if (!loginUrl || running.current || api?.loading || api?.error || !['reachable', 'none'].includes(proxyStatus)) return;
     running.current = true;
     setPhase('waiting');
     try {
@@ -69,16 +77,24 @@ export default function GenaiLoginPanel({ loginUrl, onDone }: { loginUrl: string
 
   return (
     <div className="ui-col">
-      {proxyStatus !== 'none' && (
+      {api && <div className="ui-col" role="status">
+        <div className="ui-row" style={{ color: api.loading ? 'var(--ui-neutral)' : api.error ? 'var(--ui-danger)' : api.ready ? 'var(--ui-success)' : 'var(--ui-neutral)' }}>
+          <ConnectionIcon state={api.loading ? 'checking' : api.error ? 'error' : api.ready ? 'ok' : 'none'} />
+          <span>{t(api.loading ? 'login.api.checking' : api.error ? 'login.api.error' : 'login.api.ready')}</span>
+          <Button size="sm" onClick={api.retry} disabled={api.loading || phase !== 'idle'}>{t('common.retry')}</Button>
+        </div>
+        <small className="ui-muted" style={{ overflowWrap: 'anywhere' }}>{t('login.api.address', { url: api.baseUrl })}</small>
+      </div>}
         <div className="ui-row">
           <Button size="sm" onClick={() => void checkProxy()} disabled={proxyStatus === 'checking' || phase !== 'idle'}
             aria-label={`${t('login.proxy.retry')}: ${t(`login.proxy.${proxyStatus}`)}`}
             title={`${proxyUrl ? `${proxyUrl} · ` : ''}${t(`login.proxy.${proxyStatus}`)}${proxyStatus === 'reachable' && proxyLatency !== null ? ` (${proxyLatency} ms)` : ''}`}
-            style={{ background: proxyStatus === 'reachable' ? 'var(--ui-success-bg)' : 'var(--ui-neutral-bg)', color: proxyStatus === 'reachable' ? 'var(--ui-success)' : 'var(--ui-neutral)' }}>
-            <span className="ui-dot" aria-hidden="true" />Proxy
+            style={{ background: proxyStatus === 'reachable' ? 'var(--ui-success-bg)' : ['unreachable', 'error'].includes(proxyStatus) ? 'var(--ui-danger-bg)' : 'var(--ui-neutral-bg)', color: proxyStatus === 'reachable' ? 'var(--ui-success)' : ['unreachable', 'error'].includes(proxyStatus) ? 'var(--ui-danger)' : 'var(--ui-neutral)' }}>
+            <ConnectionIcon state={proxyStatus === 'reachable' ? 'ok' : ['unreachable', 'error'].includes(proxyStatus) ? 'error' : proxyStatus === 'checking' ? 'checking' : 'none'} />
+            {t('login.proxy.label')}: {t(`login.proxy.${proxyStatus}`)}
           </Button>
         </div>
-      )}
+      <small className="ui-muted">{t('login.proxy.scope')}</small>
       {proxyUrl && (
         <details open={proxyOpen} onToggle={e => setProxyOpen(e.currentTarget.open)}>
           <summary>{t('login.proxy.title')}</summary>
@@ -90,7 +106,7 @@ export default function GenaiLoginPanel({ loginUrl, onDone }: { loginUrl: string
           </div>
         </details>
       )}
-      <Button variant="primary" onClick={() => void start()} loading={phase !== 'idle'} disabled={phase !== 'idle' || savingProxy || !['reachable', 'none'].includes(proxyStatus)}>{t('login.genai.button')}</Button>
+      {loginUrl && <Button variant="primary" onClick={() => void start()} loading={phase !== 'idle'} disabled={phase !== 'idle' || savingProxy || !!api?.loading || !!api?.error || !['reachable', 'none'].includes(proxyStatus)}>{t('login.genai.button')}</Button>}
       {phase !== 'idle' && (
         <div className="ui-row" role="status"><Spinner label="" /> {phase === 'waiting' ? t('login.genai.waiting') : t('login.genai.exchanging')}</div>
       )}

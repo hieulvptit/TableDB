@@ -28,7 +28,7 @@ export function Layout({ brand, links }: { brand: string; links: NavItem[] }) {
     <div className="app-shell">
       <a href="#main" className="app-skip">{t('nav.skip')}</a>
       <header className="app-header">
-        <div className="app-brand">VNPAY <span>{brand}</span></div>
+        <div className="app-brand">{rt.desktop && <img className="app-brand__logo" src="/tabledb-logo.svg" alt="" width="32" height="32" />}VNPAY <span>{brand}</span></div>
         <nav aria-label={t('nav.main')} className="app-nav">
           {links.filter((l) => l.show !== false).map((l) => <NavLink key={l.to} to={l.to} end={l.end} className={link}>{l.label}</NavLink>)}
         </nav>

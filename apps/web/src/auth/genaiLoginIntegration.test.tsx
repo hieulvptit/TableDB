@@ -5,15 +5,16 @@ const JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1MSJ9.c2lnbmF0dXJl';
 const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { 'Content-Type': 'application/json' } });
 const me = { user: { id: 'u1', email: 'a@vnpay.vn', name: 'A', roles: ['user'], permissions: ['db:connect'] }, csrfToken: 'x', authTime: 0, kind: 'desktop' };
 
-async function mount(genai: () => Response) {
+async function mount(genai: () => Response, authConfig?: () => Response) {
   vi.resetModules();
   vi.stubEnv('VITE_TARGET', 'desktop');
-  (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = { invoke: vi.fn(async () => ({ token: JWT })) };
+  (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = { invoke: vi.fn(async (command: string) => command === 'genai_proxy_check'
+    ? { proxyUrl: 'http://proxy.test:3359', reachable: true, latencyMs: 5 } : { token: JWT }) };
   const calls: string[] = [];
   const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
     calls.push(url);
-    if (url.endsWith('/auth/config')) return json({ providers: [], devLogin: false, desktopLoginUrl: 'https://genai.vnpay.vn/create-jwt-token' });
+    if (url.endsWith('/auth/config')) return authConfig ? authConfig() : json({ providers: [], devLogin: false, desktopLoginUrl: 'https://genai.vnpay.vn/create-jwt-token' });
     if (url.endsWith('/auth/desktop/genai')) return genai();
     if (url.endsWith('/auth/me')) return json(me);
     return json({}, 404);
@@ -45,6 +46,26 @@ async function mount(genai: () => Response) {
 afterEach(() => { vi.unstubAllEnvs(); delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__; localStorage.clear(); });
 
 describe('genai login end to end (jsdom)', () => {
+  it('keeps proxy status and credentials available when the API is unreachable; retry restores sign-in', async () => {
+    let online = false;
+    const { t, calls } = await mount(() => json({}), () => {
+      if (!online) throw new TypeError('Failed to fetch');
+      return json({ providers: [], devLogin: false, desktopLoginUrl: 'https://genai.vnpay.vn/create-jwt-token' });
+    });
+    expect(await screen.findByText(t('login.api.error'))).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: `${t('login.proxy.retry')}: ${t('login.proxy.reachable')}` })).toBeEnabled();
+    expect(screen.getByText(t('login.api.address', { url: '/api/v1' }))).toBeInTheDocument();
+    fireEvent.click(screen.getByText(t('login.proxy.title')));
+    expect(screen.getByLabelText(t('login.proxy.username'))).toBeEnabled();
+    expect(screen.getByLabelText(t('login.proxy.password'))).toBeEnabled();
+    expect(screen.queryByRole('button', { name: t('login.genai.button') })).toBeNull();
+    online = true;
+    fireEvent.click(screen.getAllByRole('button', { name: t('common.retry') })[0]!);
+    expect(await screen.findByText(t('login.api.ready'))).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: t('login.genai.button') })).toBeEnabled());
+    expect(calls.filter(u => u.endsWith('/auth/config'))).toHaveLength(2);
+  });
+
   it('success: tokens stored, AuthContext user set, router lands on /tabledb', async () => {
     const { t, calls } = await mount(() => json({ accessToken: 'AT', refreshToken: 'RT', expiresAt: Date.now() + 60_000, user: me.user }));
     fireEvent.click(await screen.findByRole('button', { name: t('login.genai.button') }));
