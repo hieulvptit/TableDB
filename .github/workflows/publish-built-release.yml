@@ -79,7 +79,9 @@ jobs:
             (cd "$directory" && sed -i 's/\r$//' SHA256SUMS.txt && sha256sum --check SHA256SUMS.txt)
             for file in "$directory"/*; do
               [[ "$(basename "$file")" == SHA256SUMS.txt ]] && continue
-              cp "$file" "release-assets/$artifact-$(basename "$file")"
+              filename="$(basename "$file")"
+              filename="${filename// /.}"
+              cp "$file" "release-assets/$artifact-$filename"
             done
           done
           (cd release-assets && sha256sum -- * > SHA256SUMS.txt)
