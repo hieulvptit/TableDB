@@ -139,7 +139,7 @@ jobs:
           for platform in windows-x64 macos-arm64 macos-x64 ubuntu-x64 debian-x64 api-linux-x64 api-windows-x64 web-bo; do
             artifact="tabledb-$platform"
             directory="desktop-artifacts/$artifact"
-            (cd "$directory" && sha256sum --check SHA256SUMS.txt)
+            (cd "$directory" && sed -i 's/\r$//' SHA256SUMS.txt && sha256sum --check SHA256SUMS.txt)
             for file in "$directory"/*; do
               [[ "$(basename "$file")" == SHA256SUMS.txt ]] && continue
               cp "$file" "release-assets/$artifact-$(basename "$file")"

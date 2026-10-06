@@ -143,7 +143,7 @@ def collect():
             raise ValueError(f"Duplicate installer filename: {path.name}")
         shutil.copy2(path, destination)
     sums = [f"{sha256(path)}  {path.name}" for path in sorted(output.iterdir())]
-    (output / "SHA256SUMS.txt").write_text("\n".join(sums) + "\n", encoding="utf-8")
+    (output / "SHA256SUMS.txt").write_text("\n".join(sums) + "\n", encoding="utf-8", newline="\n")
 
 
 if __name__ == "__main__":
