@@ -1,41 +1,30 @@
-import { useEffect, useState } from 'react';
-import { Navigate, useNavigate, useSearchParams } from 'react-router-dom';
-import { Button, Input, useToast } from '@vnpay/ui';
+import { useEffect } from 'react';
+import { Navigate, useSearchParams } from 'react-router-dom';
+import { Button } from '@vnpay/ui';
 import { apiClient } from '../api/client';
 import type { AuthConfig } from '../api/types';
 import { useAsync } from '../hooks';
-import { errorMessage, t } from '../i18n';
+import { t } from '../i18n';
 import { AsyncView } from '../components/AsyncView';
 import { useAuth } from './AuthContext';
-import { fetchAuthConfig, lastProvider, rememberProvider, safeReturnTo, webLoginUrl } from './login';
+import { fetchAuthConfig, safeReturnTo, webLoginUrl, WEB_OIDC_PROVIDER } from './login';
 
 export default function LoginPage() {
   const [sp] = useSearchParams();
-  const nav = useNavigate();
-  const toast = useToast();
-  const { status, refresh } = useAuth();
-  const returnTo = safeReturnTo(sp.get('returnTo'));
+  const { status } = useAuth();
+  const path = safeReturnTo(sp.get('returnTo'));
+  const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+  const returnTo = path === base ? '/' : path.startsWith(`${base}/`) || path.startsWith(`${base}?`) ? path.slice(base.length) : path;
   const stepup = sp.get('stepup') === '1';
   const cfg = useAsync(() => fetchAuthConfig(), []);
-  const [busy, setBusy] = useState('');
-  const [devEmail, setDevEmail] = useState('');
-
-  const signIn = (provider: string) => {
-    rememberProvider(provider);
-    window.location.assign(webLoginUrl(apiClient, provider, returnTo, stepup));
+  const signIn = () => {
+    window.location.assign(webLoginUrl(apiClient, returnTo, stepup));
   };
 
-  // Step-up: skip the chooser when we know which provider was used.
+  // There is one permitted provider, including reauthentication.
   useEffect(() => {
-    const p = lastProvider();
-    if (stepup && p && cfg.data?.providers.some((x) => x.id === p)) window.location.assign(webLoginUrl(apiClient, p, returnTo, true));
+    if (stepup && cfg.data?.providers.some((x) => x.id === WEB_OIDC_PROVIDER)) window.location.assign(webLoginUrl(apiClient, returnTo, true));
   }, [stepup, cfg.data, returnTo]);
-
-  const devLogin = async () => {
-    setBusy('dev');
-    try { await apiClient.post('/auth/dev-login', { email: devEmail }, { public: true }); await refresh(); nav(returnTo, { replace: true }); }
-    catch (e) { toast.push(errorMessage(e), 'error'); } finally { setBusy(''); }
-  };
 
   if (status === 'authenticated' && !stepup) return <Navigate to={returnTo} replace />;
   return (
@@ -43,21 +32,16 @@ export default function LoginPage() {
       <div className="ui-card nt-card login-card">
         <h1>VNPAY {t('brand.web')}</h1>
         {stepup && <p className="ui-muted">{t('login.stepup')}</p>}
-        <AsyncView state={cfg}>{(c: AuthConfig) => (
-          <div className="ui-col">
-            {c.providers.map((p) => (
-              <Button key={p.id} variant="primary" onClick={() => signIn(p.id)} loading={busy === p.id} disabled={!!busy}>{t('login.with', { name: p.label })}</Button>
-            ))}
-            {c.providers.length === 0 && <div className="ui-muted">{t('login.noProviders')}</div>}
-            {c.devLogin && (
-              <form className="ui-col" onSubmit={(e) => { e.preventDefault(); void devLogin(); }}>
-                <hr style={{ width: '100%' }} />
-                <Input label={t('login.devEmail')} type="email" value={devEmail} onChange={(e) => setDevEmail(e.target.value)} />
-                <Button type="submit" loading={busy === 'dev'} disabled={!devEmail || !!busy}>{t('login.dev')}</Button>
-              </form>
-            )}
-          </div>
-        )}</AsyncView>
+        <AsyncView state={cfg}>{(c: AuthConfig) => {
+          const provider = c.providers.find((p) => p.id === WEB_OIDC_PROVIDER);
+          return (
+            <div className="ui-col">
+              {provider
+                ? <Button variant="primary" onClick={signIn}>{t('login.with', { name: provider.label })}</Button>
+                : <div className="ui-muted">{t('login.noProviders')}</div>}
+            </div>
+          );
+        }}</AsyncView>
       </div>
     </div>
   );

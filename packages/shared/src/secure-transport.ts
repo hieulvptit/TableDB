@@ -17,7 +17,8 @@ const fail = (): never => { throw new Error('Encrypted API transport validation 
 
 export function createSecureFetch(o: SecureFetchOptions): typeof fetch {
   const crypto = o.cryptoImpl ?? globalThis.crypto;
-  if (!crypto?.subtle || !o.serverPublicKey) throw new Error('Secure API requires WebCrypto and a trusted server public key');
+  if (!crypto?.subtle) throw new Error('Secure API requires WebCrypto. Open the web app over HTTPS or use http://localhost for local development. If already using HTTPS, check the browser supports WebCrypto and the page is in a secure context.');
+  if (!o.serverPublicKey.trim()) throw new Error('Secure API requires a trusted server public key. Configure the client signing public key; for web builds, set VITE_SECURE_WEB_PUBLIC_KEY to match the API server and rebuild.');
   const direct = o.fetchImpl ?? ((...args) => globalThis.fetch(...args));
   const base = new URL(o.baseUrl.replace(/\/+$/, '') + '/', globalThis.location?.href ?? 'http://localhost/');
   const endpoint = (suffix: string) => new URL(suffix, base).href;
@@ -67,7 +68,10 @@ export function createSecureFetch(o: SecureFetchOptions): typeof fetch {
     const headers: Record<string, string> = {};
     new Headers(init.headers).forEach((v, k) => { if (!['authorization', 'content-type', 'accept', 'x-csrf-token', 'idempotency-key', 'x-part-sha256'].includes(k)) throw new Error('Unsupported encrypted request header'); headers[k] = v; });
     const method = (init.method ?? 'GET').toUpperCase();
-    await append(1, enc.encode(JSON.stringify({ method, path: url.pathname + url.search, headers })));
+    // Reverse proxies may mount the API under /c/api/v1; encrypted routes use
+    // the server's canonical namespace because proxies cannot rewrite ciphertext.
+    const serverPath = '/api/v1/' + url.pathname.slice(base.pathname.length) + url.search;
+    await append(1, enc.encode(JSON.stringify({ method, path: serverPath, headers })));
     if (init.body !== undefined && init.body !== null) {
       const body = new Uint8Array(await new Response(init.body).arrayBuffer());
       for (let i = 0; i < body.length; i += FRAME_BYTES) await append(2, body.subarray(i, i + FRAME_BYTES));

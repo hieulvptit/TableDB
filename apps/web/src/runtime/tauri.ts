@@ -82,7 +82,7 @@ export interface AgentConfigInfo {
   defaultEndpointId: string | null; defaultModel: string | null; budgetChars: number; openMetadataEnabled: boolean; openMetadataRevision?: string;
 }
 
-export interface AppInfo { serverSigningPublicKey?: string; version?: string; env?: string; apiBaseUrl?: string; [k: string]: unknown }
+export interface AppInfo { serverSigningPublicKey?: string; version?: string; env?: string; apiBaseUrl?: string; configPath?: string; configError?: string | null; logDir?: string | null; [k: string]: unknown }
 export const desktopCommands = {
   desktopConfig: () => tauriInvoke<{ genaiProxyUrl: string | null; proxyUrl: string | null; apiConnectionMode: 'direct' | 'proxy' }>('desktop_config'),
   apiHttpStart: (requestId: string, endpoint: string, headers: Record<string, string>, body: string) => tauriInvoke<{ status: number; contentType: string }>('api_http_start', { requestId, endpoint, headers, body }),

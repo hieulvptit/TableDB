@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -21,7 +20,6 @@ import (
 	"vnpay/tabledb-api/internal/outbox"
 	"vnpay/tabledb-api/internal/pii"
 	"vnpay/tabledb-api/internal/scan"
-	"vnpay/tabledb-api/internal/shared"
 	"vnpay/tabledb-api/internal/store"
 	"vnpay/tabledb-api/internal/tickets"
 )
@@ -39,23 +37,6 @@ type Overrides struct {
 	Log     *slog.Logger
 	// Disk replaces the disk guard (tests inject a fake volume). In APP_ENV=test no guard is created unless this is set.
 	Disk *diskguard.Guard
-}
-
-// NewLogger builds the structured JSON logger. Secrets are redacted: sensitive keys are masked and
-// bearer tokens / JWTs inside string values are scrubbed.
-func NewLogger(w io.Writer, level slog.Level) *slog.Logger {
-	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: level, ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-		if a.Key == slog.TimeKey || a.Key == slog.LevelKey || a.Key == slog.MessageKey {
-			return a
-		}
-		if shared.IsSensitiveKey(a.Key) {
-			return slog.String(a.Key, "[REDACTED]")
-		}
-		if a.Value.Kind() == slog.KindString {
-			return slog.String(a.Key, shared.RedactSecrets(a.Value.String()))
-		}
-		return a
-	}}))
 }
 
 // BuildDeps assembles the dependency bundle from the config (the equivalent of Ctx in main.ts).

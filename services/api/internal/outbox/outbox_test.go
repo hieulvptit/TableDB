@@ -1,8 +1,11 @@
 package outbox
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -11,6 +14,39 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
+
+func TestFailedJobsLogRetryAndExhaustion(t *testing.T) {
+	previous := slog.Default()
+	defer slog.SetDefault(previous)
+	for _, maxAttempts := range []int{2, 1} {
+		var output bytes.Buffer
+		slog.SetDefault(slog.New(slog.NewJSONHandler(&output, nil)))
+		q := &leaseDB{owner: 1}
+		job := Job{ID: 17, Type: "email", Attempts: 1, MaxAttempts: maxAttempts, Payload: []byte(`{"token":"private-payload"}`)}
+		failed, err := execute(context.Background(), q, map[string]Handler{"email": func(context.Context, Job) error {
+			return fmt.Errorf("SMTP connection refused")
+		}}, nil, job, time.Minute)
+		if err != nil || !failed {
+			t.Fatalf("execute: failed=%v err=%v", failed, err)
+		}
+		var entry map[string]any
+		if err := json.Unmarshal(output.Bytes(), &entry); err != nil {
+			t.Fatal(err)
+		}
+		if entry["job_id"] != float64(17) || entry["job_type"] != "email" || entry["attempt"] != float64(1) || entry["error"] == nil {
+			t.Fatalf("missing job diagnostics: %v", entry)
+		}
+		if maxAttempts == 2 && (entry["level"] != "WARN" || entry["retry_in_sec"] == nil) {
+			t.Fatal("missing retry diagnostics")
+		}
+		if maxAttempts == 1 && entry["level"] != "ERROR" {
+			t.Fatal("exhausted retries were not logged as an error")
+		}
+		if strings.Contains(output.String(), "private-payload") {
+			t.Fatal("job payload leaked into diagnostics")
+		}
+	}
+}
 
 // Model ownership changes independently of the worker, as another replica can.
 type leaseDB struct {

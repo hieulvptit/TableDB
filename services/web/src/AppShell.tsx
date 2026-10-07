@@ -7,12 +7,12 @@ import { t } from './i18n';
 
 const future = { v7_startTransition: true, v7_relativeSplatPath: true } as const;
 
-/** Providers + browser router (the BO portal is served from "/"). */
+/** Providers + browser router for the BO portal's configured base path. */
 export function AppShell({ children }: { children: ReactNode }) {
   return (
     <ErrorBoundary>
       <ToastProvider dismissLabel={t('toast.dismiss')}>
-        <BrowserRouter future={future}>
+        <BrowserRouter basename={import.meta.env.BASE_URL} future={future}>
           <AuthProvider>{children}</AuthProvider>
         </BrowserRouter>
         <TooltipLayer />

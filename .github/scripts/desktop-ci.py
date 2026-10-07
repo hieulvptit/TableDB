@@ -101,12 +101,12 @@ def prepare():
             "webviewInstallMode": {"type": "offlineInstaller"},
         }
     (DESKTOP / "tauri.ci.json").write_text(json.dumps(override), encoding="utf-8")
-    sample_path = TAURI / "config.sample.json"
-    sample = json.loads(sample_path.read_text(encoding="utf-8"))
-    sample["apiBaseUrl"] = base_url
+    deployment_path = TAURI / "deployment.json"
+    deployment = json.loads(deployment_path.read_text(encoding="utf-8"))
+    deployment["apiBaseUrl"] = base_url
     if os.environ.get("TABLEDB_SERVER_SIGNING_PUBLIC_KEY"):
-        sample["serverSigningPublicKey"] = os.environ["TABLEDB_SERVER_SIGNING_PUBLIC_KEY"]
-    sample_path.write_text(json.dumps(sample, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        deployment["serverSigningPublicKey"] = os.environ["TABLEDB_SERVER_SIGNING_PUBLIC_KEY"]
+    deployment_path.write_text(json.dumps(deployment, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def verify_appimage():

@@ -81,25 +81,48 @@ pub fn run() {
             // ---- config ----
             let dir = app.path().app_config_dir()?;
             let cfg_path = dir.join("config.json");
-            let _ = std::fs::create_dir_all(&dir);
+            if let Err(error) = std::fs::create_dir_all(&dir) {
+                log::warn!("cannot create bootstrap config directory {}: {}", dir.display(), error);
+            }
             let sample = dir.join("config.sample.json");
-            if !sample.exists() {
-                let _ = std::fs::write(&sample, config::SAMPLE);
+            if let Err(error) = std::fs::write(&sample, config::SAMPLE) {
+                log::warn!("cannot write local config sample {}: {}", sample.display(), error);
             }
-            // First launch uses the deployment settings embedded by CI. Existing configs are preserved.
-            if let Ok(mut file) = std::fs::OpenOptions::new().write(true).create_new(true).open(&cfg_path) {
-                use std::io::Write;
-                file.write_all(config::SAMPLE.as_bytes())?;
+            // Persist only non-network settings. Deployment addresses remain embedded.
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&cfg_path) {
+                Ok(mut file) => {
+                    use std::io::Write;
+                    if let Err(error) = file.write_all(config::SAMPLE.as_bytes()) {
+                        log::warn!("cannot write local config {}: {}", cfg_path.display(), error);
+                    }
+                    log::info!("created local bootstrap config: {}", cfg_path.display());
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => log::warn!("cannot persist bootstrap config {}; embedded deployment will be used if file is missing: {}", cfg_path.display(), error),
             }
-            let file = std::fs::read_to_string(&cfg_path).ok();
-            let (cfg, cfg_err) = match AppConfig::resolve_bootstrap(file.as_deref(), &OsEnv) {
-                Ok(c) => (c, None),
+            let loaded = match std::fs::read_to_string(&cfg_path) {
+                Ok(file) => AppConfig::resolve_bootstrap(Some(&file), &OsEnv),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    log::warn!("local bootstrap config missing at {}; using embedded deployment", cfg_path.display());
+                    AppConfig::resolve_bootstrap(None, &OsEnv)
+                }
+                Err(error) => Err(error::AppError::new("E_DESKTOP_BOOTSTRAP", format!("Cannot read bootstrap config {}: {}", cfg_path.display(), error))),
+            };
+            let (cfg, cfg_err) = match loaded {
+                Ok(c) => {
+                    // Remove legacy API, proxy and Agent addresses from existing installs.
+                    if let Err(error) = std::fs::write(&cfg_path, config::SAMPLE) {
+                        log::warn!("cannot migrate local config {}: {}", cfg_path.display(), error);
+                    }
+                    (c, None)
+                },
                 Err(e) => {
                     log::error!("config error: {}", e.message);
                     (AppConfig::default(), Some(e.message))
                 }
             };
             log::info!("TableDB desktop {} starting (env {})", app.package_info().version, cfg.env);
+            log::info!("desktop bootstrap: config_path={} api={} valid={}", cfg_path.display(), redact::redact(&cfg.api_base_url), cfg_err.is_none());
 
             // ---- sidecar (lazy) ----
             let resource_dir = app.path().resource_dir()?;

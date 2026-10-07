@@ -70,12 +70,44 @@ cd $env:USERPROFILE\Documents\TableDB
 |---|---|---|
 | `LOG_DIR` | `<exe>\logs` | |
 | `LOG_STDOUT` / `LOG_FILE_ENABLED` | `1` / `1` | log JSON ra stdout và/hoặc `app.log` (đã redact) |
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`; áp dụng sau khi restart |
 | `LOG_MAX_SIZE_MB` | `50` | xoay khi đạt dung lượng; `LOG_ROTATE_DAILY=1` xoay thêm mỗi nửa đêm; mảnh cũ nén gzip |
 | `LOG_MAX_AGE_DAYS` / `LOG_MAX_BACKUPS` | `30` / `20` | chỉ áp cho `app.log` |
 | `AUDIT_FILE_ENABLED` | `1` | `audit.jsonl`: bản sao JSONL của audit (mỗi dòng đủ `seq/prevHash/hash`); **DB vẫn là nguồn sự thật** |
 | `AUDIT_FILE_MIN_RETAIN_DAYS` | `90` | tuổi tối thiểu trước khi mảnh audit có thể bị janitor xóa |
 | `DISK_MAX_USED_PCT` | `90` (50..95) | tổng dung lượng đã dùng của **ổ chứa STORAGE_DIR/LOG_DIR** (kể cả dữ liệu khác trên ổ đó) |
 | `DISK_CHECK_INTERVAL_SEC` / `DISK_RESERVE_MB` | `60` / `256` | |
+
+API dùng Zap để ghi JSON đồng bộ, không sampling; mỗi dòng có `time`, `level`, `msg`, `caller`. Lỗi server ở mức ERROR có `stacktrace`; panic có thêm `panic_stack` tại vị trí panic. Mật khẩu, token, cookie, khóa riêng và session ID trong các trường log được che, kể cả trường lồng nhau. Log không ghi body hay query string. `audit.jsonl` vẫn giữ định dạng chuỗi audit riêng.
+
+Khi xử lý sự cố, lấy `X-Request-ID` từ response trong Network rồi tìm `request_id` tương ứng trong `app.log`:
+
+```sh
+rg '55f0e270917808f3' logs/app.log
+```
+
+Lỗi API có `code`, `error`, `error_type`, `status`, `method`, `route` (mẫu route), `ip`. Validation có `validation_fields`; lỗi PostgreSQL có `sqlstate` nếu lỗi gốc cung cấp mã này. Lỗi 4xx ghi WARN, lỗi 5xx ghi ERROR. Với Secure API, dòng `request` ghi status của HTTP bên ngoài; dòng `secure API request` ghi status thật của API bên trong cùng `request_id`, nên ngoài 200 vẫn có thể là trong 400/403/500.
+
+Lỗi transport ghi `secure transport rejected request` với `code`, `reason` và `stage` khi lỗi frame. Các trường `record_index`, `expected_bytes`, `received_bytes` chỉ vị trí và kích thước lỗi; không chứa nội dung gói. Ví dụ lỗi do tiền tố `/c/` còn nằm trong metadata:
+
+```json
+{"level":"WARN","msg":"secure transport rejected request","request_id":"55f0e270917808f3","status":400,"code":"SECURE_REQUEST","reason":"invalid_api_path","expected_path_prefix":"/api/v1/","received_path_prefix":"/c/api/v1/"}
+```
+
+| `reason` | Kiểm tra |
+|---|---|
+| `invalid_content_type` | Proxy có giữ `Content-Type: application/vnd.tabledb.aesgcm` không |
+| `invalid_api_path` | Web đã cập nhật để metadata dùng `/api/v1/`; proxy chỉ bỏ prefix URL ngoài |
+| `frame_prefix_read_failed` / `frame_ciphertext_read_failed` | Body bị cắt, đọc timeout hoặc thiếu frame cuối; xem `stage`, số byte và `error` |
+| `frame_authentication_failed` | Frame không xác thực được với session/sequence hiện tại; kiểm tra phiên bản client và việc thay đổi gói/header trên đường truyền |
+| `invalid_sequence_header` | Proxy/client có gửi header `X-TableDB-Sequence` là số nguyên không |
+| `session_not_found` | API vừa restart, thiếu header session hoặc các request tới nhiều instance không có sticky routing |
+| `session_expired` | Session hết hạn; xem `expired_at`, reload để tạo phiên mới |
+| `replayed_or_invalid_sequence` | Request dùng lại sequence hoặc ngoài cửa sổ chấp nhận; không tự replay mutation |
+| `request_body_too_large` | So sánh `body_bytes` với `body_limit_bytes` |
+| `response_write_failed` / `response_length_mismatch` | Client ngắt kết nối, lỗi ghi response hoặc số byte khác Content-Length |
+
+Worker ghi `outbox job retry scheduled` / `outbox job exhausted retries` với `job_id`, `job_type`, `attempt`, `max_attempts`, `error`; lần thử lại có `retry_in_sec`. Dùng các trường này để tìm job và nguyên nhân adapter/SMTP/scan, không cần đọc payload.
 
 Chính sách khi dùng ≥ giới hạn (dừng ngay khi < giới hạn − 2): (1) xóa mảnh log ứng dụng cũ nhất → (2) xóa ciphertext của ticket đã REJECTED/REVOKED/QUARANTINED/EXPIRED/ABORTED còn sót (`storage.purge`, `reason=disk-pressure`) → (3) xóa mảnh **bản sao** audit cũ nhất, chỉ khi ≥ `AUDIT_FILE_MIN_RETAIN_DAYS` ngày **và** đã có `GET /audit/verify` thành công hoặc `GET /audit/export` đầy đủ sau khi mảnh đóng (vì DB giữ chuỗi gốc nên không mất dữ liệu audit) → (4) không xóa dữ liệu sống/DB. Vẫn vượt: `POST /transfers` và upload part trả **507 `INSUFFICIENT_STORAGE`**, ghi audit `storage.pressure` + WARN, `/healthz` có `disk.state=blocked`. Trước khi nhận upload còn có admission control: dùng + `size×1.1` + `DISK_RESERVE_MB` không được vượt giới hạn. **Hãy chạy `/audit/verify` định kỳ (hoặc xuất audit hằng tuần ra kho ngoài)** — nếu không, mảnh audit không bao giờ bị xóa và đĩa có thể đầy hơn.
 Cảnh báo: PostgreSQL trên cùng máy cũng tính vào % đĩa; janitor không đụng vào DB. Dev trên macOS/Linux đã dùng >90% đĩa sẽ bị 507 ngay — đặt `DISK_MAX_USED_PCT=95`.

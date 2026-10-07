@@ -1,9 +1,7 @@
 import { apiClient, type ApiClient, type StepUpOutcome } from '../api/client';
 import type { AuthConfig } from '../api/types';
 
-const PROVIDER_KEY = 'tabledb.lastProvider';
-export const rememberProvider = (id: string) => { try { localStorage.setItem(PROVIDER_KEY, id); } catch { /* storage may be blocked */ } };
-export const lastProvider = (): string | null => { try { return localStorage.getItem(PROVIDER_KEY); } catch { return null; } };
+export const WEB_OIDC_PROVIDER = 'powerbi';
 
 export const fetchAuthConfig = (c: ApiClient = apiClient) => c.get<AuthConfig>('/auth/config', { public: true });
 
@@ -13,16 +11,18 @@ export function safeReturnTo(p: string | null | undefined): string {
   return p;
 }
 
-export function webLoginUrl(c: ApiClient, provider: string, returnTo: string, stepup = false): string {
-  return c.url('/auth/login', { provider, returnTo: safeReturnTo(returnTo), stepup: stepup ? 1 : undefined });
+export function webLoginUrl(c: ApiClient, returnTo: string, stepup = false): string {
+  const path = safeReturnTo(returnTo);
+  const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+  const appPath = path === base || path.startsWith(`${base}/`) || path.startsWith(`${base}?`) ? path : `${base}${path}`;
+  return c.url('/auth/login', { provider: WEB_OIDC_PROVIDER, returnTo: appPath, stepup: stepup ? 1 : undefined });
 }
 
-/** Step-up: navigate to the IdP login (or /login?stepup=1) and let the page reload. */
+/** Web step-up always uses the permitted OIDC provider. */
 export function installStepUpHandler(c: ApiClient = apiClient, nav: (url: string) => void = (u) => window.location.assign(u)) {
   c.onStepUp = async (): Promise<StepUpOutcome> => {
-    const provider = lastProvider();
     const here = window.location.pathname + window.location.search;
-    nav(provider ? webLoginUrl(c, provider, here, true) : `/login?stepup=1&returnTo=${encodeURIComponent(here)}`);
+    nav(webLoginUrl(c, here, true));
     return 'redirected';
   };
 }

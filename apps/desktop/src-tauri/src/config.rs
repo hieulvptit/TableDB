@@ -1,11 +1,12 @@
 //! Desktop runtime config: `config.json` in the app config dir (%APPDATA%\vn.vnpay.tabledb on Windows),
-//! with environment overrides. Contains no secrets.
+//! Network deployment is embedded at build time; local config contains no addresses or secrets.
 
 use crate::error::AppError;
 use crate::urlcheck::validate_endpoint;
 use serde::{Deserialize, Serialize};
 
 pub const SAMPLE: &str = include_str!("../config.sample.json");
+pub const DEPLOYMENT: &str = include_str!("../deployment.json");
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -232,7 +233,7 @@ pub struct AppConfig {
     pub agent: AgentConfig,
 }
 fn default_signing_pin() -> String {
- let sample: serde_json::Value = serde_json::from_str(SAMPLE).expect("valid sample");
+ let sample: serde_json::Value = serde_json::from_str(DEPLOYMENT).expect("valid embedded deployment");
  sample["serverSigningPublicKey"].as_str().unwrap_or("").to_string()
 }
 fn default_true() -> bool {
@@ -262,23 +263,18 @@ impl EnvSource for OsEnv {
 }
 
 impl AppConfig {
-    /// Production bootstrap reads only fields required to reach the config server.
-    pub fn resolve_bootstrap(file: Option<&str>, env: &dyn EnvSource) -> Result<Self, AppError> {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Bootstrap {
-            #[serde(default = "default_env")] env: String,
-            #[serde(default)] api_base_url: String,
-            #[serde(default = "default_signing_pin")] server_signing_public_key: String,
-            #[serde(default)] proxy: ProxyConfig,
+    /// Network addresses and trust come from the build, never from the local file.
+    pub fn resolve_bootstrap(file: Option<&str>, _env: &dyn EnvSource) -> Result<Self, AppError> {
+        // Validate JSON before migrating old files, but ignore all legacy settings.
+        if let Some(file) = file {
+            let value: serde_json::Value = serde_json::from_str(file)
+                .map_err(|_| AppError::bad_request("invalid bootstrap configuration"))?;
+            if !value.is_object() {
+                return Err(AppError::bad_request("bootstrap configuration must be an object"));
+            }
         }
-        let raw: Bootstrap = serde_json::from_str(file.unwrap_or("{}"))
-            .map_err(|_| AppError::bad_request("invalid bootstrap configuration"))?;
-        let mut config = AppConfig { env: raw.env, api_base_url: raw.api_base_url, server_signing_public_key: raw.server_signing_public_key, proxy: raw.proxy, ..AppConfig::default() };
-        if let Some(v) = env.get("TABLEDB_ENV") { config.env = v.trim().into(); }
-        if let Some(v) = env.get("TABLEDB_API_BASE_URL") { config.api_base_url = v.trim().into(); }
-        if let Some(v) = env.get("TABLEDB_PROXY_URL") { config.proxy.url = Some(v.trim().into()); }
-        if let Some(v) = env.get("TABLEDB_SERVER_SIGNING_PUBLIC_KEY") { config.server_signing_public_key = v.trim().into(); }
+        let mut config: AppConfig = serde_json::from_str(DEPLOYMENT)
+            .map_err(|_| AppError::bad_request("invalid embedded deployment"))?;
         config.validate()?;
         Ok(config)
     }
@@ -378,15 +374,15 @@ mod tests {
 
     #[test]
     fn sample_is_valid() {
-        let c = AppConfig::resolve(Some(SAMPLE), &Fake(HashMap::new())).unwrap();
-        assert_eq!(c.env, "test");
+        let c = AppConfig::resolve(Some(DEPLOYMENT), &Fake(HashMap::new())).unwrap();
+        assert_eq!(c.env, "prod");
         assert!(c.proxy.url.is_none());
     }
 
     #[test]
     fn env_overrides_file() {
         let env = Fake(HashMap::from([("TABLEDB_ENV", "prod"), ("TABLEDB_API_BASE_URL", "https://api.vnpay.vn/"), ("TABLEDB_PROXY_URL", "http://proxy:8080")]));
-        let c = AppConfig::resolve(Some(SAMPLE), &env).unwrap();
+        let c = AppConfig::resolve(Some(DEPLOYMENT), &env).unwrap();
         assert_eq!(c.env, "prod");
         assert_eq!(c.api_base_url, "https://api.vnpay.vn");
         assert_eq!(c.proxy.url.as_deref(), Some("http://proxy:8080"));
@@ -490,8 +486,50 @@ mod tests {
     fn production_bootstrap_ignores_obsolete_operational_fields() {
         let json = r#"{"env":"test","apiBaseUrl":"http://127.0.0.1:8080","agent":"obsolete","genaiLoginOrigins":["invalid"],"sidecar":{"maxHeapMb":1}}"#;
         let config = AppConfig::resolve_bootstrap(Some(json), &Fake(std::collections::HashMap::new())).unwrap();
-        assert_eq!(config.api_base_url, "http://127.0.0.1:8080");
+        assert_eq!(config.api_base_url, AppConfig::resolve(Some(DEPLOYMENT), &Fake(HashMap::new())).unwrap().api_base_url);
+        assert_eq!(config.env, "prod");
         assert!(config.agent.endpoints.is_empty());
+    }
+
+    #[test]
+    fn legacy_local_addresses_and_trust_cannot_override_deployment() {
+        let old = r#"{"env":"test","apiBaseUrl":"https://other.invalid","serverSigningPublicKey":"invalid","proxy":{"url":"http://other.invalid"},"genaiProxyUrl":"http://other.invalid","agent":{"endpoints":[]}}"#;
+        let env = Fake(HashMap::from([("TABLEDB_ENV", "test"), ("TABLEDB_PROXY_URL", "http://other.invalid"), ("TABLEDB_SERVER_SIGNING_PUBLIC_KEY", "invalid")]));
+        let config = AppConfig::resolve_bootstrap(Some(old), &env).unwrap();
+        assert_eq!(config.env, "prod");
+        assert_eq!(config.api_base_url, AppConfig::resolve(Some(DEPLOYMENT), &Fake(HashMap::new())).unwrap().api_base_url);
+        assert_eq!(config.server_signing_public_key, default_signing_pin());
+        assert!(config.proxy.url.is_none());
+        assert!(config.genai_proxy_url.is_none());
+        assert!(config.agent.endpoints.is_empty());
+        let local: serde_json::Value = serde_json::from_str(SAMPLE).unwrap();
+        assert_eq!(local, serde_json::json!({"env": "prod"}));
+    }
+
+    #[test]
+    fn missing_local_bootstrap_uses_embedded_deployment() {
+        let env = Fake(HashMap::new());
+        let embedded = AppConfig::resolve_bootstrap(Some(SAMPLE), &env).unwrap();
+        let missing = AppConfig::resolve_bootstrap(None, &env).unwrap();
+        assert_eq!(missing.api_base_url, embedded.api_base_url);
+        assert_eq!(missing.server_signing_public_key, embedded.server_signing_public_key);
+        assert_eq!(missing.env, embedded.env);
+        assert!(!missing.api_base_url.is_empty());
+    }
+
+    #[test]
+    fn environment_cannot_override_pinned_bootstrap() {
+        let env = Fake(HashMap::from([("TABLEDB_API_BASE_URL", "http://127.0.0.1:8080/c/")]));
+        let missing = AppConfig::resolve_bootstrap(None, &env).unwrap();
+        assert_eq!(missing.api_base_url, AppConfig::resolve(Some(DEPLOYMENT), &Fake(HashMap::new())).unwrap().api_base_url);
+    }
+
+    #[test]
+    fn invalid_existing_bootstrap_is_not_replaced_by_embedded_defaults() {
+        let env = Fake(HashMap::new());
+        assert!(AppConfig::resolve_bootstrap(Some("bad json"), &env).is_err());
+        assert!(AppConfig::resolve_bootstrap(Some("[]"), &env).is_err());
+        assert!(AppConfig::resolve_bootstrap(Some("{}"), &env).is_ok());
     }
 
 }

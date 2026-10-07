@@ -37,8 +37,9 @@ func envMap() map[string]string {
 }
 
 func main() {
+	slog.SetDefault(server.NewLogger(os.Stderr, slog.LevelInfo))
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "fatal:", err)
+		slog.Error("server stopped", "stage", "startup_or_serve", "error", err)
 		os.Exit(1)
 	}
 }
@@ -52,7 +53,7 @@ func run() error {
 	logs, err := server.OpenLogs(cfg)
 	if err != nil {
 		// a read-only install directory (container, hardened service) must not stop the server: stdout logging continues
-		fmt.Fprintf(os.Stderr, "warning: log directory %s unusable (%v); file logs and the audit file copy are disabled\n", cfg.LogDir, err)
+		slog.Warn("file logging unavailable; using stdout", "log_dir", cfg.LogDir, "error", err)
 		logs = &server.Logs{}
 	}
 	defer logs.Close()
@@ -72,14 +73,14 @@ func run() error {
 		log.Info("starting embedded PostgreSQL (first run downloads the binaries)", "data_dir", cfg.PgliteDir)
 		embedded, err = db.StartEmbedded(cfg.PgliteDir, io.Discard)
 		if err != nil {
-			return err
+			return fmt.Errorf("start embedded PostgreSQL: %w", err)
 		}
 		defer embedded.Stop() //nolint:errcheck
 		dbURL = embedded.URL
 	}
 	pool, err := db.Open(ctx, dbURL)
 	if err != nil {
-		return err
+		return fmt.Errorf("open database: %w", err)
 	}
 	defer pool.Close()
 	applied, err := migrate.Run(ctx, pool)
@@ -129,13 +130,14 @@ func run() error {
 
 	srv := &http.Server{
 		Addr: net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)), Handler: server.Handler(deps),
+		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelError),
 		ReadHeaderTimeout: 15 * time.Second, IdleTimeout: 120 * time.Second,
 	}
 	errc := make(chan error, 1)
 	ln, err := net.Listen("tcp", srv.Addr)
 	if err != nil {
 		worker.Stop()
-		return err
+		return fmt.Errorf("listen on %s: %w", srv.Addr, err)
 	}
 	go func() { errc <- srv.Serve(ln) }()
 	log.Info("listening", "addr", ln.Addr().String(), "env", cfg.Env)

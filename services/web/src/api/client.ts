@@ -35,7 +35,7 @@ export class ApiClient {
   onUnauthenticated?: ApiClientOptions['onUnauthenticated'];
 
   constructor(o: ApiClientOptions = {}) {
-    this.baseUrl = (o.baseUrl ?? '/api/v1').replace(/\/+$/, '');
+    this.baseUrl = (o.baseUrl ?? import.meta.env.VITE_API_BASE ?? `${import.meta.env.BASE_URL}api/v1`).replace(/\/+$/, '');
     this.fetchImpl = o.fetchImpl ?? ((...a) => globalThis.fetch(...a));
     this.onStepUp = o.onStepUp;
     this.onUnauthenticated = o.onUnauthenticated;

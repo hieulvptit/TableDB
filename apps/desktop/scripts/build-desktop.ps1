@@ -3,7 +3,7 @@
 .DESCRIPTION
   Produces src-tauri\target\release\bundle\nsis\*.exe (+ .sig / latest.json inputs when updater signing is configured).
   The CSP in tauri.conf.json is static, so the API origin is injected here via a generated --config override.
-.PARAMETER ApiOrigin        API base URL, e.g. http://10.23.5.40:8080/c/ (optional deployment path prefix)
+.PARAMETER ApiOrigin        API base URL, e.g. https://10.23.5.40:8080/c/ (optional deployment path prefix)
 .PARAMETER UpdaterPubkey    Public key from `tauri signer generate` (contents of the .pub file). Enables updater artifacts together with
                             $env:TAURI_SIGNING_PRIVATE_KEY (+ TAURI_SIGNING_PRIVATE_KEY_PASSWORD).
 .PARAMETER UpdaterEndpoint  https URL template of the update manifest, e.g. https://updates.vnpay.vn/tabledb/{{target}}-{{arch}}/{{current_version}}
@@ -38,6 +38,13 @@ if ($apiUri.Scheme -eq 'http') {
   if (-not $apiUri.IsLoopback -and -not $privateIp) { throw 'HTTP API base URL must use loopback or a private IP' }
 }
 $apiCspOrigin = $apiUri.GetLeftPart([UriPartial]::Authority)
+# Pin the same deployment base into native code; never write addresses to local config.json.
+$deploymentPath = Join-Path $desk 'src-tauri\deployment.json'
+$deployment = Get-Content -Raw $deploymentPath | ConvertFrom-Json
+$deployment.apiBaseUrl = $ApiOrigin
+$deploymentJson = $deployment | ConvertTo-Json -Depth 10
+[IO.File]::WriteAllText($deploymentPath, $deploymentJson, [Text.UTF8Encoding]::new($false))
+
 
 if (-not $SkipJre)     { & (Join-Path $PSScriptRoot 'build-jre.ps1') }
 if (-not $SkipSidecar) { & (Join-Path $PSScriptRoot 'stage-sidecar.ps1') }

@@ -43,6 +43,18 @@ func TestDefaults(t *testing.T) {
 	}
 }
 
+func TestLogLevelConfiguration(t *testing.T) {
+	for _, level := range []string{"debug", "info", "warn", "error", "DEBUG"} {
+		cfg, err := Load(map[string]string{"LOG_LEVEL": level})
+		if err != nil || cfg.LogLevel != strings.ToLower(level) {
+			t.Fatalf("log level %q: %v", level, err)
+		}
+	}
+	if _, err := Load(map[string]string{"LOG_LEVEL": "trace"}); err == nil {
+		t.Fatal("invalid log level accepted")
+	}
+}
+
 func TestPIIConfiguration(t *testing.T) {
 	c, err := Load(with(prod(), "PII_ENABLED", "1", "PII_LLM_URL", "https://genai.vnpay.vn/aigateway/llm_kimi/v1/chat/completions"))
 	if err != nil || !c.PII.Enabled || c.PII.SampleLines != 20 || c.PII.ChunkChars != 12000 {

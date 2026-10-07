@@ -38,15 +38,16 @@ navigation of the main window is pinned to the app origin. Desktop API envelopes
 
 ## Configuration
 
-`%APPDATA%\vn.vnpay.tabledb\config.json` (a `config.sample.json` is dropped next to it on first run):
+`%APPDATA%\vn.vnpay.tabledb\config.json` and `config.sample.json` contain only:
 
 ```json
-{ "env": "test", "apiBaseUrl": "http://10.23.5.40:8080/c/" }
+{ "env": "prod" }
 ```
 
-Deployment settings (SSO browser/origins/proxy/cookies/callback/timeout, general proxy, Java heap) are fetched by Rust from public `GET /api/v1/desktop/config` before sign-in, configured through server `DESKTOP_CONFIG`. The local equivalents and their TABLEDB_* env overrides are retained for old config parsing but do not override server deployment settings. Only local `proxy.url` may assist the bootstrap fetch. Restart the app to pick up deployment changes.
+The native binary embeds the API base URL and public signing key from `src-tauri/deployment.json` at build time (default API: `https://10.23.5.40:8080/c/`). Local files and environment variables cannot override bootstrap addresses, trust or environment. On startup, valid legacy local files are replaced with the minimal config above; malformed or unreadable files produce an explicit error. No config file is needed to reach the server. Moving from `test` to `prod` changes the credential-manager namespace, so users need to sign in again.
 
-Overrides: `TABLEDB_ENV`, `TABLEDB_API_BASE_URL`, `TABLEDB_PROXY_URL`. `env` (`test|prod`) namespaces the credential-manager service.
+Rust retrieves desktop settings (SSO proxy/browser/origins, general proxy, Java heap and timeouts) from `/api/v1/desktop/config` through secure transport. Agent endpoints and runtime settings come from `/api/v1/agent/config` after sign-in. These settings remain in memory and are never written to local config.json. Restart the app to pick up server deployment changes. Embedded addresses can still be extracted from a binary; this prevents plaintext local configuration disclosure, not reverse engineering.
+
 `apiBaseUrl` is the pinned API base. Rust sends the renderer's AES envelopes only to `/api/v1/secure/handshake` and `/api/v1/secure/request`; response chunks are read on demand so downloads remain streamed. API calls do not depend on WebView CORS, CSP exceptions, OS proxy settings, or `HTTP_PROXY`/`HTTPS_PROXY`. Without a configured API proxy, connections are direct. A configured proxy applies to remote API hosts; `localhost` and loopback IPs always connect directly.
 
 `proxy.url` is exposed via `app_info` for the updater (`check({proxy})`); the sidecar's DB/Trino proxy is per-profile (`profile.options.proxy`). Rust fetches desktop and Agent settings from the pinned API origin, and performs LLM/MCP calls.
@@ -54,13 +55,13 @@ Overrides: `TABLEDB_ENV`, `TABLEDB_API_BASE_URL`, `TABLEDB_PROXY_URL`. `env` (`t
 Logs: `%LOCALAPPDATA%\vn.vnpay.tabledb\logs\tabledb.log` (5 MB rotation, keep 5), every line passes through `redact.rs`
 (bearer/JWT, `password|token|secret|code_verifier…=` pairs, `code`/`state` URL params, URL userinfo).
 
+If startup shows "Không tải được cấu hình desktop", the error screen includes the actual API URL, local config path, error code and failed stage. `E_DESKTOP_BOOTSTRAP` means local configuration failed before network traffic; IPC permission errors also appear directly. Native logs record `desktop configuration fetch started` and `native secure API sending` with the URL and request ID. Match that ID with the API server's `request_id`. `E_CONFIG_NETWORK` distinguishes connection/build/timeout errors; `handshake_http` shows the HTTP status, and `handshake_signature` points to a mismatch between the trusted desktop public key and the API's desktop signing key. Native API requests do not appear in the WebView Network tab. The native startup migrates valid old config files to the minimal prod config.
+
 ## SSO proxy
 
 Server defaults use the SSO-only proxy `http://10.23.5.189:3359` via
 `genaiProxyUrl` in server `DESKTOP_CONFIG`. This setting
-does not route the TableDB API or JDBC connections through that proxy. Existing
-installations must add the setting to their existing config; new installations
-create `config.json` from the embedded deployment sample on first launch.
+does not route the TableDB API or JDBC connections through that proxy. Change this setting on the server; desktop installations retrieve it at startup.
 
 On the login screen, expand **SSO login proxy**, enter the proxy username/password,
 and save them once. They are stored as `proxy.sso.credentials` in Windows Credential
@@ -125,20 +126,13 @@ jdk.unsupported, jdk.httpserver, jdk.crypto.ec, jdk.naming.dns` (modules missing
 | `tabledb-ubuntu-x64` | Ubuntu 22.04 container, x64 | `.deb`, `.AppImage` |
 | `tabledb-debian-x64` | Debian 12 container, x64 | `.deb` |
 
-The default deployment API is `http://10.23.5.40:8080/c/`. To override it, set
-**Settings → Secrets and variables → Actions → Variables → `TABLEDB_API_ORIGIN`**
-to the API base URL (an optional path prefix such as `/c/` is supported). HTTPS is accepted for any host;
-HTTP is accepted for localhost, loopback IPs and RFC1918 private IPv4 addresses.
-Then choose **Actions → Desktop builds → Run workflow**. The optional `api_origin`
-input overrides the repository variable for that run. Pushes to `main`, tags matching
-`desktop-v*`, and relevant pull requests also trigger builds.
+The default deployment API is `https://10.23.5.40:8080/c/`. To build for another deployment, choose **Actions → Desktop builds → Run workflow** and set the optional `api_origin` input. The default does not use the old `TABLEDB_API_ORIGIN` repository variable. HTTPS is accepted for any host; HTTP is accepted for localhost, loopback IPs and RFC1918 private IPv4 addresses. Pushes to `main`, tags matching `desktop-v*`, and relevant pull requests also trigger builds.
 
 The shared assets job uses the root npm lockfile, builds the SPA with `VITE_TARGET=desktop`,
 tests/builds the JDBC jar and fetches the pinned JDBC drivers with checksum verification.
 Each platform creates its own JRE from Temurin JDK 21, smoke-tests the sidecar, runs Rust
 tests and builds Tauri packages. The API origin is injected into the CSP while preserving
-the Agent sandbox directive, and into the embedded `config.sample.json`. Configure the
-installed app's `config.json` using that sample (or set `TABLEDB_API_BASE_URL`).
+the Agent sandbox directive, and into the compiled `deployment.json`. Changing the API base or signing key requires rebuilding and installing the desktop binary.
 
 Download packages from the run's **Artifacts** section. Each platform artifact includes
 `SHA256SUMS.txt` and is retained for 30 days. The Linux builds need a desktop environment

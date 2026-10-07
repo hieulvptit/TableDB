@@ -10,8 +10,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -176,5 +178,96 @@ func TestRequestAdmissionBounded(t *testing.T) {
 	tr.Wrap(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("admission limit bypassed") })).ServeHTTP(w, request(t, s, 1, true))
 	if w.Code != 429 {
 		t.Fatal(w.Code)
+	}
+}
+
+func TestRejectionDiagnostics(t *testing.T) {
+	for _, tc := range []struct {
+		name, reason string
+		modify       func(*testing.T, *session, *http.Request)
+	}{
+		{"content type", "invalid_content_type", func(_ *testing.T, _ *session, r *http.Request) {
+			r.Header.Set("Content-Type", "application/octet-stream")
+		}},
+		{"metadata record", "frame_prefix_read_failed", func(_ *testing.T, _ *session, r *http.Request) {
+			r.Body = io.NopCloser(strings.NewReader("bad"))
+		}},
+		{"truncated ciphertext", "frame_ciphertext_read_failed", func(t *testing.T, _ *session, r *http.Request) {
+			wire, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.Body = io.NopCloser(bytes.NewReader(wire[:5]))
+		}},
+		{"tampered ciphertext", "frame_authentication_failed", func(t *testing.T, _ *session, r *http.Request) {
+			wire, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wire[4] ^= 1
+			r.Body = io.NopCloser(bytes.NewReader(wire))
+		}},
+		{"proxy prefix in encrypted path", "invalid_api_path", func(t *testing.T, s *session, r *http.Request) {
+			var body bytes.Buffer
+			index := uint32(0)
+			meta, _ := json.Marshal(requestMeta{Method: "POST", Path: "/c/api/v1/mutate?token=private-query", Headers: map[string]string{"authorization": "Bearer private-token"}})
+			if err := writeRecord(&body, s.receive, s.id, "c2s", 1, &index, 1, meta); err != nil {
+				t.Fatal(err)
+			}
+			r.Body = io.NopCloser(&body)
+		}},
+		{"missing terminal record", "frame_prefix_read_failed", func(t *testing.T, s *session, r *http.Request) {
+			r.Body = request(t, s, 1, false).Body
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr, s := fixture(t)
+			var logs bytes.Buffer
+			tr.cfg.Log = slog.New(slog.NewJSONHandler(&logs, nil))
+			r := request(t, s, 1, true)
+			tc.modify(t, s, r)
+			w := httptest.NewRecorder()
+			w.Header().Set("X-Request-ID", "test-request-id")
+			tr.Wrap(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("rejected request dispatched") })).ServeHTTP(w, r)
+			if w.Code != 400 {
+				t.Fatalf("status = %d", w.Code)
+			}
+			var entry map[string]any
+			if err := json.Unmarshal(logs.Bytes(), &entry); err != nil {
+				t.Fatal(err)
+			}
+			if entry["reason"] != tc.reason || entry["request_id"] != "test-request-id" || entry["status"] != float64(400) || entry["code"] == "" {
+				t.Fatalf("unexpected diagnostics: %v", entry)
+			}
+			for _, secret := range []string{"private-query", "private-token", "/c/api/v1/mutate"} {
+				if strings.Contains(logs.String(), secret) {
+					t.Fatal("diagnostics disclosed request data")
+				}
+			}
+			var response struct {
+				Error struct{ Code, Message string }
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil || response.Error.Code != entry["code"] || response.Error.Message != "secure transport rejected request" {
+				t.Fatal("public error response changed")
+			}
+		})
+	}
+}
+
+func TestSecureAPILogReportsInnerStatusAndRoute(t *testing.T) {
+	tr, s := fixture(t)
+	var logs bytes.Buffer
+	tr.cfg.Log = slog.New(slog.NewJSONHandler(&logs, nil))
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/mutate", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(403) })
+	w := httptest.NewRecorder()
+	w.Header().Set("X-Request-ID", "inner-status-id")
+	tr.Wrap(mux).ServeHTTP(w, request(t, s, 1, true))
+	var entry map[string]any
+	if err := json.Unmarshal(logs.Bytes(), &entry); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != 200 || entry["status"] != float64(403) || entry["route"] != "POST /api/v1/mutate" || entry["request_id"] != "inner-status-id" || entry["level"] != "WARN" {
+		t.Fatalf("inner failure hidden by outer response: status=%d; log=%v", w.Code, entry)
 	}
 }

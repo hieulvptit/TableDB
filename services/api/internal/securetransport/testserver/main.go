@@ -47,6 +47,7 @@ func main() {
 			return
 		}
 		w.Header().Set("X-Client-Kind", securetransport.ClientKind(r.Context()))
+		w.Header().Set("X-Request-Path", r.URL.RequestURI())
 		w.Header().Set("X-Auth", r.Header.Get("Authorization"))
 		if r.Method == "GET" {
 			if r.URL.Path == "/api/v1/transfers/fixture/download" {

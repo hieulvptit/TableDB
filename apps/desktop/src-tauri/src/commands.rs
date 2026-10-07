@@ -481,11 +481,22 @@ pub async fn transfer_save_abort(state: State<'_, AppState>, handle: String) -> 
 }
 
 async fn fetch_deployment(state: &AppState, path: &str, access_token: Option<&str>, proxy: Option<&str>, timeout_sec: u64) -> Result<crate::agent_http::HttpRes, AppError> {
+ if let Some(error) = &state.config_error {
+  return Err(AppError::new("E_DESKTOP_BOOTSTRAP", crate::redact::redact(error)));
+ }
+ crate::urlcheck::validate_api_endpoint(&state.config.api_base_url)?;
  let base = state.config.api_base_url.trim_end_matches('/');
  let base = if base.ends_with("/api/v1") { base.to_string() } else { format!("{base}/api/v1") };
+ let mode = if crate::api_transport::effective_proxy(&base, proxy).is_some() { "proxy" } else { "direct" };
+ log::info!("desktop configuration fetch started: api={} route={} connection={} timeout_sec={}", crate::redact::redact(&base), path, mode, timeout_sec);
  let client = crate::api_transport::client(&base, proxy)?;
- tokio::time::timeout(std::time::Duration::from_secs(timeout_sec), crate::secure_transport::get(&client, &base, &state.config.server_signing_public_key, path, access_token))
-  .await.map_err(|_| AppError::new("E_CONFIG_NETWORK", "API configuration request timed out"))?
+ let result = tokio::time::timeout(std::time::Duration::from_secs(timeout_sec), crate::secure_transport::get(&client, &base, &state.config.server_signing_public_key, path, access_token))
+  .await.unwrap_or_else(|_| Err(AppError::new("E_CONFIG_NETWORK", format!("API configuration request timed out after {timeout_sec}s ({base})"))));
+ match &result {
+  Ok(response) => log::info!("desktop configuration fetch completed: api={} route={} status={}", crate::redact::redact(&base), path, response.status),
+  Err(error) => log::error!("desktop configuration fetch failed: api={} route={} code={} error={}", crate::redact::redact(&base), path, error.code, crate::redact::redact(&error.message)),
+ }
+ result
 }
 impl AppState {
  async fn deployment(&self) -> Result<crate::config::DesktopDeployment, AppError> {
@@ -503,7 +514,10 @@ impl AppState {
 }
 #[tauri::command]
 pub async fn desktop_config(state: State<'_, AppState>) -> Result<Value, AppError> {
- let d = state.deployment().await?;
+ let d = state.deployment().await.map_err(|error| {
+  log::error!("desktop_config failed: config_path={} code={} error={}", state.config_path, error.code, crate::redact::redact(&error.message));
+  error
+ })?;
  let mode = if crate::api_transport::effective_proxy(&state.config.api_base_url, d.config.proxy.url.as_deref()).is_some() { "proxy" } else { "direct" };
  Ok(json!({ "genaiProxyUrl": d.config.genai_proxy_url, "proxyUrl": d.config.proxy.url, "apiConnectionMode": mode }))
 }

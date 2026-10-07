@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -60,6 +61,7 @@ func Handler(d *app.Deps) http.Handler {
 	if d.Cfg.SecureTransportEnabled {
 		settings := d.Cfg.SecureTransport
 		settings.ClientIP = d.ClientIP
+		settings.Log = d.Log
 		transport, err := securetransport.New(settings)
 		if err != nil {
 			panic("invalid secure transport configuration")
@@ -123,7 +125,9 @@ func recoverer(d *app.Deps, next http.Handler) http.Handler {
 				if rec == http.ErrAbortHandler {
 					panic(rec)
 				}
-				d.Log.Error("panic", "panic", strings.ReplaceAll(sprint(rec), "\n", " "))
+				d.Log.Error("HTTP handler panic", "request_id", w.Header().Get("X-Request-ID"),
+					"method", r.Method, "path", r.URL.Path, "status", 500,
+					"panic", strings.ReplaceAll(sprint(rec), "\n", " "), "panic_stack", string(debug.Stack()))
 				app.WriteJSON(w, 500, map[string]any{"error": map[string]any{"code": "INTERNAL", "message": "internal error"}})
 			}
 		}()
@@ -146,7 +150,13 @@ func requestLog(d *app.Deps, next http.Handler) http.Handler {
 		if d.Cfg.Env == "test" {
 			return
 		}
-		d.Log.Info("request", slog.String("request_id", id), slog.String("method", r.Method), slog.String("path", r.URL.Path),
+		level := slog.LevelInfo
+		if sw.status >= 500 {
+			level = slog.LevelError
+		} else if sw.status >= 400 {
+			level = slog.LevelWarn
+		}
+		d.Log.Log(r.Context(), level, "request", slog.String("request_id", id), slog.String("method", r.Method), slog.String("path", r.URL.Path),
 			slog.Int("status", sw.status), slog.Int64("ms", time.Since(start).Milliseconds()), slog.String("ip", d.ClientIP(r)))
 	})
 }
@@ -188,7 +198,7 @@ func cors(d *app.Deps, next http.Handler) http.Handler {
 		h := w.Header()
 		h.Set("Access-Control-Allow-Origin", origin)
 		h.Set("Vary", "Origin")
-		h.Set("Access-Control-Expose-Headers", "x-content-sha256, content-disposition, x-stepup")
+		h.Set("Access-Control-Expose-Headers", "x-content-sha256, content-disposition, x-stepup, x-request-id")
 		if r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {
 			h.Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 			h.Set("Access-Control-Allow-Headers", "authorization, content-type, idempotency-key, x-part-sha256, x-csrf-token, x-tabledb-session, x-tabledb-sequence")

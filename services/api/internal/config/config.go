@@ -108,6 +108,7 @@ type Config struct {
 	LogDir                 string
 	LogFileEnabled         bool
 	LogToStdout            bool
+	LogLevel               string
 	LogMaxSizeMB           int
 	LogMaxAgeDays          int
 	LogMaxBackups          int
@@ -187,6 +188,10 @@ func Load(src map[string]string) (*Config, error) {
 		errs = append(errs, "APP_ENV: Invalid enum value. Expected 'dev' | 'test' | 'prod'")
 	}
 	publicURL := e.str("PUBLIC_URL", "http://localhost:8080")
+	logLevel := strings.ToLower(e.str("LOG_LEVEL", "info"))
+	if logLevel != "debug" && logLevel != "info" && logLevel != "warn" && logLevel != "error" {
+		errs = append(errs, "LOG_LEVEL: Expected 'debug' | 'info' | 'warn' | 'error'")
+	}
 	if !validURL(publicURL) {
 		errs = append(errs, "PUBLIC_URL: Invalid url")
 	}
@@ -247,6 +252,7 @@ func Load(src map[string]string) (*Config, error) {
 			ChunkChars: posInt("PII_CHUNK_CHARS", 12000, 128), TimeoutSec: posInt("PII_TIMEOUT_SEC", 180, 1), SampleLines: posInt("PII_SAMPLE_LINES", 20, 1)},
 
 		LogDir: resolvePath(base, e.str("LOG_DIR", ""), "logs"), LogFileEnabled: flag("LOG_FILE_ENABLED", true), LogToStdout: flag("LOG_STDOUT", true),
+		LogLevel:     logLevel,
 		LogMaxSizeMB: posInt("LOG_MAX_SIZE_MB", 50, 1), LogMaxAgeDays: posInt("LOG_MAX_AGE_DAYS", 30, 0), LogMaxBackups: posInt("LOG_MAX_BACKUPS", 20, 0),
 		LogRotateDaily: flag("LOG_ROTATE_DAILY", true), AuditFileEnabled: flag("AUDIT_FILE_ENABLED", true),
 		AuditFileMinRetainDays: posInt("AUDIT_FILE_MIN_RETAIN_DAYS", 90, 0),

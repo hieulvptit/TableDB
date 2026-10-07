@@ -43,6 +43,7 @@ Chuỗi rỗng được coi như chưa đặt. Ở `APP_ENV=prod` cấu hình b�
 | `STORAGE_DIR` | `<thư mục exe>/data/files` | kho ciphertext cục bộ. Mặc định và đường dẫn tương đối **neo theo thư mục chứa exe**, không theo CWD (Windows deploy trong Documents); `go run` dùng CWD; `APP_BASE_DIR` ghi đè gốc |
 | `LOG_DIR` | `<thư mục exe>/logs` | `app.log` (slog JSON) + `audit.jsonl` + mảnh `.gz` xoay vòng. Không ghi được ⇒ cảnh báo và chỉ log stdout |
 | `LOG_STDOUT` / `LOG_FILE_ENABLED` / `LOG_ROTATE_DAILY` | 1 / 1 / 1 | |
+| `LOG_LEVEL` | `info` | Zap JSON: `debug`, `info`, `warn`, `error`; lỗi 5xx có stack trace, mọi log có caller |
 | `LOG_MAX_SIZE_MB` / `LOG_MAX_AGE_DAYS` / `LOG_MAX_BACKUPS` | 50 / 30 / 20 | xoay theo dung lượng (+ hằng ngày), nén gzip; age/backups áp cho `app.log` |
 | `AUDIT_FILE_ENABLED` / `AUDIT_FILE_MIN_RETAIN_DAYS` | 1 / 90 | bản sao JSONL của audit (DB vẫn là nguồn sự thật); tuổi tối thiểu trước khi janitor được xóa mảnh cũ (cần thêm `/audit/verify` hoặc export đầy đủ) |
 | `DISK_MAX_USED_PCT` | 90 | 50..95; tổng % đã dùng của ổ chứa kho/log. Vượt ⇒ janitor dọn, vẫn vượt ⇒ 507 `INSUFFICIENT_STORAGE` |

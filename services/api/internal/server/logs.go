@@ -31,7 +31,7 @@ func (l *Logs) Close() {
 	}
 }
 
-// OpenLogs creates LOG_DIR and the rotating files: app.log (slog JSON) and audit.jsonl (audit sink copy, never age-pruned
+// OpenLogs creates LOG_DIR and the rotating files: app.log (Zap JSON) and audit.jsonl (audit sink copy, never age-pruned
 // by the rotator — only the disk janitor may remove old segments, and only under its rules).
 func OpenLogs(cfg *config.Config) (*Logs, error) {
 	l := &Logs{}
@@ -61,7 +61,11 @@ func AppLogger(cfg *config.Config, l *Logs) *slog.Logger {
 	if l != nil && l.App != nil {
 		ws = append(ws, l.App)
 	}
-	return NewLogger(io.MultiWriter(ws...), slog.LevelInfo)
+	level := slog.LevelInfo
+	if cfg.LogLevel != "" {
+		_ = level.UnmarshalText([]byte(cfg.LogLevel)) // validated by config.Load
+	}
+	return NewLogger(io.MultiWriter(ws...), level)
 }
 
 // NewJanitor wires the disk janitor to the file store, the log directory and the audit trail.

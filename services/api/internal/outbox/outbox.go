@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math"
 	"math/rand/v2"
+	"runtime/debug"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -193,10 +194,18 @@ func execute(ctx context.Context, q db.Querier, handlers map[string]Handler, onD
 		if err == nil && tag.RowsAffected() == 1 && onDead != nil {
 			onDead(ctx, job, herr)
 		}
+		if err == nil && tag.RowsAffected() == 1 {
+			slog.ErrorContext(ctx, "outbox job exhausted retries", "job_id", job.ID, "job_type", job.Type,
+				"attempt", job.Attempts, "max_attempts", job.MaxAttempts, "error", herr)
+		}
 		return true, err
 	}
 	secs := math.Round(BackoffSec(job.Attempts, nil))
-	_, err := q.Exec(ctx, "UPDATE outbox SET state='pending', last_error=$3, next_run_at=now() + make_interval(secs => $4), updated_at=now()"+owned, job.ID, job.Attempts, msg, secs)
+	tag, err := q.Exec(ctx, "UPDATE outbox SET state='pending', last_error=$3, next_run_at=now() + make_interval(secs => $4), updated_at=now()"+owned, job.ID, job.Attempts, msg, secs)
+	if err == nil && tag.RowsAffected() == 1 {
+		slog.WarnContext(ctx, "outbox job retry scheduled", "job_id", job.ID, "job_type", job.Type,
+			"attempt", job.Attempts, "max_attempts", job.MaxAttempts, "retry_in_sec", secs, "error", herr)
+	}
 	return true, err
 }
 
@@ -204,7 +213,7 @@ func runHandler(ctx context.Context, handlers map[string]Handler, job Job) (err 
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("handler panic: %v", r)
-			slog.Error("outbox handler panic", "type", job.Type, "id", job.ID, "panic", fmt.Sprint(r))
+			slog.ErrorContext(ctx, "outbox handler panic", "job_type", job.Type, "job_id", job.ID, "panic", fmt.Sprint(r), "panic_stack", string(debug.Stack()))
 		}
 	}()
 	h, ok := handlers[job.Type]

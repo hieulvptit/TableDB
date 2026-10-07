@@ -12,6 +12,19 @@ beforeAll(async () => {
 afterAll(() => { if (server?.pid) { if (process.platform === 'win32') server.kill(); else process.kill(-server.pid, 'SIGTERM'); } });
 function client(kind: 'web' | 'desktop', direct?: typeof fetch, pin?: string) { return createSecureFetch({ baseUrl: keys.url, clientKind: kind, serverPublicKey: pin ?? keys[kind], cryptoImpl: webcrypto as unknown as Crypto, fetchImpl: direct }); }
 describe('Go server ↔ WebCrypto clients', () => {
+ it('uses canonical encrypted routes behind a /c reverse-proxy mount', async () => {
+  const baseUrl = keys.url.replace('/api/v1', '/c/api/v1');
+  const endpoints: string[] = [];
+  const proxy: typeof fetch = (url, init) => {
+   endpoints.push(String(url));
+   return fetch(String(url).replace('/c/api/v1/', '/api/v1/'), init);
+  };
+  const f = createSecureFetch({ baseUrl, clientKind: 'web', serverPublicKey: keys.web, cryptoImpl: webcrypto as unknown as Crypto, fetchImpl: proxy });
+  const response = await f(baseUrl + '/echo?value=1', { method: 'POST', body: 'mounted-api' });
+  expect(response.headers.get('x-request-path')).toBe('/api/v1/echo?value=1');
+  expect(await response.text()).toBe('mounted-api');
+  expect(endpoints).toEqual([baseUrl + '/secure/handshake', baseUrl + '/secure/request']);
+ });
  it('uses independent web and desktop pins and authenticates encrypted headers/body', async () => {
   for (const kind of ['web', 'desktop'] as const) {
    const f = client(kind); const payload = 'private-data'.repeat(15000);

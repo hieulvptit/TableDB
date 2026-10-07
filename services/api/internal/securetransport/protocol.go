@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
@@ -63,6 +64,7 @@ func ClientKind(ctx context.Context) string { v, _ := ctx.Value(kindKey{}).(stri
 func IsEncrypted(ctx context.Context) bool { v, _ := ctx.Value(encryptedKey{}).(bool); return v }
 
 type Settings struct {
+	Log                 *slog.Logger
 	SigningKey          string
 	WebSigningKey       string
 	Required            bool
@@ -209,9 +211,51 @@ func failure(w http.ResponseWriter, status int, code string) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": code, "message": "secure transport rejected request"}})
 }
+
+// Keep diagnostics on the server: never log decrypted routes, headers, bodies,
+// session IDs, keys or raw parsing/cryptographic errors.
+func (t *Transport) reject(w http.ResponseWriter, r *http.Request, status int, code, reason string, fields ...any) {
+	if t.cfg.Log != nil {
+		attrs := []any{
+			"request_id", w.Header().Get("X-Request-ID"), "status", status,
+			"code", code, "reason", reason, "method", r.Method, "path", r.URL.Path,
+		}
+		if t.cfg.ClientIP != nil {
+			attrs = append(attrs, "ip", t.cfg.ClientIP(r))
+		}
+		attrs = append(attrs, fields...)
+		level := slog.LevelWarn
+		if status >= 500 {
+			level = slog.LevelError
+		}
+		t.cfg.Log.Log(r.Context(), level, "secure transport rejected request", attrs...)
+	}
+	failure(w, status, code)
+}
+
+func (t *Transport) rejectRecord(w http.ResponseWriter, r *http.Request, stage string, err error) {
+	fields := []any{"stage", stage}
+	reason := "invalid_" + stage + "_record"
+	var detail *recordError
+	if errors.As(err, &detail) {
+		reason = detail.reason
+		fields = append(fields, "record_index", detail.index, "expected_bytes", detail.expected, "received_bytes", detail.received)
+		if detail.cause != nil {
+			fields = append(fields, "error", detail.cause.Error())
+		}
+	}
+	t.reject(w, r, 400, "SECURE_RECORD", reason, fields...)
+}
+
+func diagnosticText(value string) string {
+	if len(value) > 128 {
+		return value[:128] + "[TRUNCATED]"
+	}
+	return value
+}
 func (t *Transport) handshake(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
-		failure(w, 405, "SECURE_METHOD")
+		t.reject(w, r, 405, "SECURE_METHOD", "invalid_handshake_method")
 		return
 	}
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
@@ -231,7 +275,7 @@ func (t *Transport) handshake(w http.ResponseWriter, r *http.Request) {
 	}
 	if e.count >= t.cfg.HandshakesPerMinute || (e.count == 0 && len(t.rates) >= 8192) {
 		t.mu.Unlock()
-		failure(w, 429, "SECURE_RATE_LIMIT")
+		t.reject(w, r, 429, "SECURE_RATE_LIMIT", "handshake_rate_limit")
 		return
 	}
 	e.count++
@@ -243,48 +287,48 @@ func (t *Transport) handshake(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(io.LimitReader(r.Body, 4097))
 	dec.DisallowUnknownFields()
 	if dec.Decode(&h) != nil || h.Version != Version || (h.ClientKind != "desktop" && h.ClientKind != "web") {
-		failure(w, 400, "SECURE_HANDSHAKE")
+		t.reject(w, r, 400, "SECURE_HANDSHAKE", "invalid_handshake_metadata")
 		return
 	}
 	var extra any
 	if dec.Decode(&extra) != io.EOF {
-		failure(w, 400, "SECURE_HANDSHAKE")
+		t.reject(w, r, 400, "SECURE_HANDSHAKE", "trailing_handshake_json")
 		return
 	}
 	pub, err := base64.StdEncoding.DecodeString(h.PublicKey)
 	if err != nil {
-		failure(w, 400, "SECURE_HANDSHAKE")
+		t.reject(w, r, 400, "SECURE_HANDSHAKE", "invalid_client_public_key_encoding")
 		return
 	}
 	client, err := ecdh.P256().NewPublicKey(pub)
 	if err != nil {
-		failure(w, 400, "SECURE_HANDSHAKE")
+		t.reject(w, r, 400, "SECURE_HANDSHAKE", "invalid_client_public_key")
 		return
 	}
 	challenge, err := base64.StdEncoding.DecodeString(h.Nonce)
 	if err != nil || len(challenge) != 32 {
-		failure(w, 400, "SECURE_HANDSHAKE")
+		t.reject(w, r, 400, "SECURE_HANDSHAKE", "invalid_client_nonce")
 		return
 	}
 	now := t.now()
 	ephemeral, err := ecdh.P256().GenerateKey(rand.Reader)
 	if err != nil {
-		failure(w, 500, "SECURE_HANDSHAKE")
+		t.reject(w, r, 500, "SECURE_HANDSHAKE", "server_ephemeral_key_failed")
 		return
 	}
 	secret, err := ephemeral.ECDH(client)
 	if err != nil {
-		failure(w, 400, "SECURE_HANDSHAKE")
+		t.reject(w, r, 400, "SECURE_HANDSHAKE", "key_agreement_failed")
 		return
 	}
 	id := make([]byte, 24)
 	serverNonce := make([]byte, 32)
 	if _, err = rand.Read(id); err != nil {
-		failure(w, 500, "SECURE_HANDSHAKE")
+		t.reject(w, r, 500, "SECURE_HANDSHAKE", "session_id_generation_failed")
 		return
 	}
 	if _, err = rand.Read(serverNonce); err != nil {
-		failure(w, 500, "SECURE_HANDSHAKE")
+		t.reject(w, r, 500, "SECURE_HANDSHAKE", "server_nonce_generation_failed")
 		return
 	}
 	out := welcome{Version: Version, SessionID: base64.RawURLEncoding.EncodeToString(id), PublicKey: base64.StdEncoding.EncodeToString(ephemeral.PublicKey().Bytes()), Nonce: base64.StdEncoding.EncodeToString(serverNonce), ExpiresAt: now.Add(t.cfg.TTL).Unix()}
@@ -292,12 +336,12 @@ func (t *Transport) handshake(w http.ResponseWriter, r *http.Request) {
 	digest := sha256.Sum256([]byte(tr))
 	receive, err := derive(secret, digest[:], "c2s")
 	if err != nil {
-		failure(w, 500, "SECURE_HANDSHAKE")
+		t.reject(w, r, 500, "SECURE_HANDSHAKE", "receive_key_derivation_failed")
 		return
 	}
 	send, err := derive(secret, digest[:], "s2c")
 	if err != nil {
-		failure(w, 500, "SECURE_HANDSHAKE")
+		t.reject(w, r, 500, "SECURE_HANDSHAKE", "send_key_derivation_failed")
 		return
 	}
 	signing := t.signing
@@ -305,12 +349,12 @@ func (t *Transport) handshake(w http.ResponseWriter, r *http.Request) {
 		signing = t.webSigning
 	}
 	if signing == nil {
-		failure(w, 400, "SECURE_CLIENT_KIND")
+		t.reject(w, r, 400, "SECURE_CLIENT_KIND", "client_kind_not_configured")
 		return
 	}
 	rr, ss, err := ecdsa.Sign(rand.Reader, signing, digest[:])
 	if err != nil {
-		failure(w, 500, "SECURE_HANDSHAKE")
+		t.reject(w, r, 500, "SECURE_HANDSHAKE", "handshake_signature_failed")
 		return
 	}
 	signature := make([]byte, 64)
@@ -326,7 +370,7 @@ func (t *Transport) handshake(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(t.sessions) >= t.cfg.MaxSessions {
 		t.mu.Unlock()
-		failure(w, 503, "SECURE_CAPACITY")
+		t.reject(w, r, 503, "SECURE_CAPACITY", "session_capacity")
 		return
 	}
 	t.sessions[out.SessionID] = &session{kind: h.ClientKind, id: out.SessionID, expires: time.Unix(out.ExpiresAt, 0), send: send, receive: receive, seen: map[uint64]bool{}}
@@ -359,24 +403,44 @@ type records struct {
 	done     bool
 }
 
+type recordError struct {
+	reason             string
+	index              uint32
+	expected, received int
+	cause              error
+}
+
+func (e *recordError) Error() string { return e.reason }
+func (e *recordError) Unwrap() error { return errRecord }
+
+func (r *records) invalid(reason string, expected, received int, cause error) error {
+	return &recordError{reason: reason, index: r.index, expected: expected, received: received, cause: cause}
+}
+
 func (r *records) record() (byte, []byte, error) {
 	var prefix [4]byte
-	if _, err := io.ReadFull(r.reader, prefix[:]); err != nil {
-		return 0, nil, errRecord
+	if n, err := io.ReadFull(r.reader, prefix[:]); err != nil {
+		return 0, nil, r.invalid("frame_prefix_read_failed", 4, n, err)
 	}
 	n := binary.BigEndian.Uint32(prefix[:])
-	if n < 17 || n > FrameBytes+1024 || r.index == ^uint32(0) {
-		return 0, nil, errRecord
+	if n < 17 || n > FrameBytes+1024 {
+		return 0, nil, r.invalid("invalid_frame_size", FrameBytes+1024, int(n), nil)
+	}
+	if r.index == ^uint32(0) {
+		return 0, nil, r.invalid("record_index_exhausted", 0, 0, nil)
 	}
 	sealed := make([]byte, n)
-	if _, err := io.ReadFull(r.reader, sealed); err != nil {
-		return 0, nil, errRecord
+	if read, err := io.ReadFull(r.reader, sealed); err != nil {
+		return 0, nil, r.invalid("frame_ciphertext_read_failed", int(n), read, err)
 	}
 	plain, err := r.key.Open(nil, nonce(r.seq, r.index), sealed, aad(r.id, r.seq, r.index, r.dir))
-	r.index++
-	if err != nil || len(plain) == 0 {
-		return 0, nil, errRecord
+	if err != nil {
+		return 0, nil, r.invalid("frame_authentication_failed", int(n), len(sealed), nil)
 	}
+	if len(plain) == 0 {
+		return 0, nil, r.invalid("empty_plaintext_record", 1, 0, nil)
+	}
+	r.index++
 	return plain[0], plain[1:], nil
 }
 func (r *records) Read(p []byte) (int, error) {
@@ -391,21 +455,21 @@ func (r *records) Read(p []byte) (int, error) {
 		switch kind {
 		case 2:
 			if len(data) == 0 {
-				return 0, errRecord
+				return 0, r.invalid("empty_body_record", 1, 0, nil)
 			}
 			r.buffered = data
 		case 3:
 			if len(data) != 0 {
-				return 0, errRecord
+				return 0, r.invalid("terminal_record_has_payload", 0, len(data), nil)
 			}
 			var b [1]byte
 			n, err := r.reader.Read(b[:])
 			if n != 0 || err != io.EOF {
-				return 0, errRecord
+				return 0, r.invalid("trailing_data_or_read_failure", 0, n, err)
 			}
 			r.done = true
 		default:
-			return 0, errRecord
+			return 0, r.invalid("unexpected_body_record_kind", 2, int(kind), nil)
 		}
 	}
 	if r.done {
@@ -432,6 +496,7 @@ func writeRecord(w io.Writer, key cipher.AEAD, id, dir string, seq uint64, index
 }
 
 type secureWriter struct {
+	status   int
 	written  int64
 	expected *int64
 	outer    http.ResponseWriter
@@ -449,6 +514,7 @@ func (s *secureWriter) WriteHeader(status int) {
 		return
 	}
 	s.started = true
+	s.status = status
 	if value := s.headers.Get("Content-Length"); value != "" {
 		n, err := strconv.ParseInt(value, 10, 64)
 		if err == nil && n >= 0 {
@@ -521,14 +587,19 @@ func (t *Transport) Wrap(next http.Handler) http.Handler {
 		}
 		if r.URL.Path != requestPath {
 			if t.cfg.Required && strings.HasPrefix(r.URL.Path, "/api/v1/") && r.URL.Path != "/api/v1/auth/login" && r.URL.Path != "/api/v1/auth/callback" && !(r.URL.Path == "/api/v1/email-approval" && (r.Method == "GET" || r.Method == "HEAD")) && !(r.URL.Path == "/api/v1/email-approval.js" && (r.Method == "GET" || r.Method == "HEAD")) && r.Method != "OPTIONS" {
-				failure(w, 426, "SECURE_TRANSPORT_REQUIRED")
+				t.reject(w, r, 426, "SECURE_TRANSPORT_REQUIRED", "plaintext_api_request")
 				return
 			}
 			next.ServeHTTP(w, r)
 			return
 		}
-		if r.Method != "POST" || r.Header.Get("Content-Type") != ContentType {
-			failure(w, 400, "SECURE_REQUEST")
+		if r.Method != "POST" {
+			t.reject(w, r, 400, "SECURE_REQUEST", "invalid_outer_method")
+			return
+		}
+		if r.Header.Get("Content-Type") != ContentType {
+			t.reject(w, r, 400, "SECURE_REQUEST", "invalid_content_type", "expected_content_type", ContentType,
+				"received_content_type", diagnosticText(r.Header.Get("Content-Type")))
 			return
 		}
 		id := r.Header.Get("X-TableDB-Session")
@@ -536,34 +607,60 @@ func (t *Transport) Wrap(next http.Handler) http.Handler {
 		t.mu.Lock()
 		s := t.sessions[id]
 		t.mu.Unlock()
-		if err != nil || s == nil || !t.now().Before(s.expires) {
-			failure(w, 410, "SECURE_SESSION_EXPIRED")
+		if err != nil {
+			t.reject(w, r, 410, "SECURE_SESSION_EXPIRED", "invalid_sequence_header")
+			return
+		}
+		if s == nil {
+			t.reject(w, r, 410, "SECURE_SESSION_EXPIRED", "session_not_found")
+			return
+		}
+		if !t.now().Before(s.expires) {
+			t.reject(w, r, 410, "SECURE_SESSION_EXPIRED", "session_expired", "expired_at", s.expires, "client_kind", s.kind)
 			return
 		}
 		stream := &records{reader: r.Body, key: s.receive, id: id, dir: "c2s", seq: seq}
 		kind, data, err := stream.record()
-		if err != nil || kind != 1 || len(data) > 16384 {
-			failure(w, 400, "SECURE_RECORD")
+		if err != nil {
+			t.rejectRecord(w, r, "metadata", err)
+			return
+		}
+		if kind != 1 || len(data) > 16384 {
+			t.reject(w, r, 400, "SECURE_RECORD", "invalid_metadata_kind_or_size", "record_kind", kind, "metadata_bytes", len(data), "metadata_limit_bytes", 16384)
 			return
 		}
 		var meta requestMeta
-		if json.Unmarshal(data, &meta) != nil || !strings.HasPrefix(meta.Path, "/api/v1/") || strings.HasPrefix(meta.Path, "/api/v1/secure/") || len(meta.Path) > 8192 || (meta.Method != "GET" && meta.Method != "POST" && meta.Method != "PUT" && meta.Method != "DELETE") {
-			failure(w, 400, "SECURE_REQUEST")
+		if json.Unmarshal(data, &meta) != nil {
+			t.reject(w, r, 400, "SECURE_REQUEST", "invalid_metadata_json")
+			return
+		}
+		if !strings.HasPrefix(meta.Path, "/api/v1/") || strings.HasPrefix(meta.Path, "/api/v1/secure/") || len(meta.Path) > 8192 {
+			prefix := "unrecognized"
+			if strings.HasPrefix(meta.Path, "/c/api/v1/") {
+				prefix = "/c/api/v1/"
+			} else if strings.HasPrefix(meta.Path, "/api/v1/") {
+				prefix = "/api/v1/"
+			}
+			t.reject(w, r, 400, "SECURE_REQUEST", "invalid_api_path", "expected_path_prefix", "/api/v1/", "received_path_prefix", prefix, "path_bytes", len(meta.Path))
+			return
+		}
+		if meta.Method != "GET" && meta.Method != "POST" && meta.Method != "PUT" && meta.Method != "DELETE" {
+			t.reject(w, r, 400, "SECURE_REQUEST", "invalid_inner_method", "received_method", diagnosticText(meta.Method), "allowed_methods", "GET, POST, PUT, DELETE")
 			return
 		}
 		inner := r.Clone(context.WithValue(context.WithValue(r.Context(), encryptedKey{}, true), kindKey{}, s.kind))
 		inner.Method = meta.Method
 		inner.URL, err = inner.URL.Parse(meta.Path)
 		if err != nil || inner.URL.Host != "" || inner.URL.Fragment != "" || path.Clean(inner.URL.Path) != inner.URL.Path || strings.HasPrefix(inner.URL.Path, "/api/v1/secure/") {
-			failure(w, 400, "SECURE_REQUEST")
+			t.reject(w, r, 400, "SECURE_REQUEST", "invalid_inner_url")
 			return
 		}
 		if (strings.HasPrefix(inner.URL.Path, "/api/v1/auth/desktop/") || inner.URL.Path == "/api/v1/desktop/config" || strings.HasPrefix(inner.URL.Path, "/api/v1/agent/")) && s.kind != "desktop" {
-			failure(w, 403, "SECURE_CLIENT_KIND")
+			t.reject(w, r, 403, "SECURE_CLIENT_KIND", "desktop_channel_required")
 			return
 		}
 		if inner.URL.Path == "/api/v1/auth/dev-login" && s.kind != "web" {
-			failure(w, 403, "SECURE_CLIENT_KIND")
+			t.reject(w, r, 403, "SECURE_CLIENT_KIND", "web_channel_required")
 			return
 		}
 		inner.RequestURI = inner.URL.RequestURI()
@@ -578,24 +675,24 @@ func (t *Transport) Wrap(next http.Handler) http.Handler {
 			switch strings.ToLower(k) {
 			case "authorization", "content-type", "accept", "x-csrf-token", "idempotency-key", "x-part-sha256":
 			default:
-				failure(w, 400, "SECURE_REQUEST")
+				t.reject(w, r, 400, "SECURE_REQUEST", "unsupported_inner_header", "header_name", diagnosticText(k))
 				return
 			}
 			if len(v) > 8192 || strings.ContainsAny(v, "\r\n") {
-				failure(w, 400, "SECURE_REQUEST")
+				t.reject(w, r, 400, "SECURE_REQUEST", "invalid_inner_header_value", "header_name", diagnosticText(k), "value_bytes", len(v), "value_limit_bytes", 8192)
 				return
 			}
 			inner.Header.Set(k, v)
 		}
 		if !s.accept(seq) {
-			failure(w, 409, "SECURE_REPLAY")
+			t.reject(w, r, 409, "SECURE_REPLAY", "replayed_or_invalid_sequence", "sequence", seq)
 			return
 		}
 		select {
 		case t.slots <- struct{}{}:
 			defer func() { <-t.slots }()
 		default:
-			failure(w, 429, "SECURE_CAPACITY")
+			t.reject(w, r, 429, "SECURE_CAPACITY", "inflight_limit")
 			return
 		}
 		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(120 * time.Second))
@@ -603,8 +700,16 @@ func (t *Transport) Wrap(next http.Handler) http.Handler {
 		// Validate the authenticated final record before dispatching any mutation.
 		// Uploads already arrive as bounded parts; downloads stay streamed.
 		payload, err := io.ReadAll(io.LimitReader(stream, t.cfg.MaxRequestBytes+1))
-		if err != nil || int64(len(payload)) > t.cfg.MaxRequestBytes || (meta.Method == "GET" && len(payload) != 0) {
-			failure(w, 400, "SECURE_RECORD")
+		if err != nil {
+			t.rejectRecord(w, r, "body", err)
+			return
+		}
+		if int64(len(payload)) > t.cfg.MaxRequestBytes {
+			t.reject(w, r, 400, "SECURE_RECORD", "request_body_too_large", "body_bytes", len(payload), "body_limit_bytes", t.cfg.MaxRequestBytes)
+			return
+		}
+		if meta.Method == "GET" && len(payload) != 0 {
+			t.reject(w, r, 400, "SECURE_RECORD", "get_request_has_body", "body_bytes", len(payload))
 			return
 		}
 		inner.Body = io.NopCloser(bytes.NewReader(payload))
@@ -615,7 +720,26 @@ func (t *Transport) Wrap(next http.Handler) http.Handler {
 			responseHeaders.Set("X-Request-ID", id)
 		}
 		encrypted := &secureWriter{outer: w, session: s, seq: seq, headers: responseHeaders}
+		start := time.Now()
 		next.ServeHTTP(encrypted, inner)
 		encrypted.finish()
+		if t.cfg.Log != nil {
+			level := slog.LevelInfo
+			if encrypted.status >= 500 || encrypted.err != nil {
+				level = slog.LevelError
+			} else if encrypted.status >= 400 {
+				level = slog.LevelWarn
+			}
+			fields := []any{"request_id", w.Header().Get("X-Request-ID"), "client_kind", s.kind,
+				"method", inner.Method, "route", inner.Pattern, "status", encrypted.status,
+				"ms", time.Since(start).Milliseconds(), "response_bytes", encrypted.written}
+			if encrypted.err != nil {
+				fields = append(fields, "reason", "response_write_failed", "error", encrypted.err.Error())
+			} else if encrypted.expected != nil && encrypted.written != *encrypted.expected {
+				level = slog.LevelError
+				fields = append(fields, "reason", "response_length_mismatch", "expected_bytes", *encrypted.expected)
+			}
+			t.cfg.Log.Log(r.Context(), level, "secure API request", fields...)
+		}
 	})
 }

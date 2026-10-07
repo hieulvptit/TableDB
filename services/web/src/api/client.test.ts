@@ -15,7 +15,7 @@ describe('ApiClient (web: cookie + CSRF)', () => {
     const c = new ApiClient({ fetchImpl: f as unknown as typeof fetch });
     await c.post('/x', { a: 1 });
     await c.get('/y');
-    expect(f.mock.calls[0]![0]).toBe('/api/v1/auth/me');
+    expect(f.mock.calls[0]![0]).toBe('/c/api/v1/auth/me');
     expect(hdr(f, 1)['X-CSRF-Token']).toBe('tok1');
     expect(hdr(f, 1)['Authorization']).toBeUndefined();
     expect(hdr(f, 2)['X-CSRF-Token']).toBeUndefined();

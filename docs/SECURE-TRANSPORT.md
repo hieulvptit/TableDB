@@ -44,6 +44,8 @@ BO downloads register a module service worker under the assets scope. A one-use 
 
 Sessions, replay state and admission limits are local to one API instance. Multiple instances require sticky routing of handshake and encrypted requests to the same instance. Restarting an instance invalidates its live sessions. A client may have to start a fresh session/reload after such a restart; never replay a mutation merely because its response was lost.
 
+When a reverse proxy mounts the API under a prefix such as `/c/api/v1`, it must forward transport endpoints to `/api/v1/secure/*`. The shared browser client keeps the external prefix for HTTP requests and uses canonical `/api/v1/*` routes inside encrypted metadata; proxies cannot rewrite encrypted paths. For rejected `/secure/request` calls, the API emits a warning with `request_id`, `status`, `code` and `reason` alongside the access log. `invalid_api_path` indicates rejected route metadata, `invalid_content_type` indicates the outer content type is incorrect, and `frame_prefix_read_failed`, `frame_ciphertext_read_failed` or `frame_authentication_failed` identifies the frame validation failure, with `stage`, `record_index` and byte counts. Diagnostics omit decrypted paths, headers, bodies, session IDs and keys.
+
 This is an application protocol built from standard crypto primitives, not TLS/HPKE and not an independently audited protocol. HTTPS and normal authorization remain mandatory.
 
 ## Validation and maintenance

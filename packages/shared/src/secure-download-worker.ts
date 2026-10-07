@@ -10,8 +10,10 @@ export function installSecureDownloadWorker(scope: WorkerSurface): void {
     const d = event.data; const port = event.ports[0]; if (!port || d?.type !== 'tabledb-download') return;
     try {
       if (!event.source?.url || new URL(event.source.url).origin !== scope.location.origin || !d.baseUrl || !d.serverPublicKey || !d.path) throw new Error('Invalid client');
-      const base = new URL(d.baseUrl); if (base.origin !== scope.location.origin || base.pathname.replace(/\/$/, '') !== '/api/v1') throw new Error('Invalid API');
-      const url = new URL(d.path, base.origin); if (!/^\/api\/v1\/transfers\/[^/]+\/download$/.test(url.pathname) || !url.searchParams.get('t')) throw new Error('Invalid download');
+      const base = new URL(d.baseUrl); const apiPath = base.pathname.replace(/\/$/, '');
+      if (base.origin !== scope.location.origin || !['/api/v1', '/c/api/v1'].includes(apiPath)) throw new Error('Invalid API');
+      const url = new URL(d.path, base.origin); const downloadPath = url.pathname.slice(apiPath.length);
+      if (url.origin !== base.origin || !url.pathname.startsWith(`${apiPath}/`) || !/^\/transfers\/[^/]+\/download$/.test(downloadPath) || !url.searchParams.get('t')) throw new Error('Invalid download');
       for (const [key, t] of tickets) if (t.expires < Date.now()) tickets.delete(key);
       if (tickets.size >= 16) throw new Error('Too many downloads');
       const key = crypto.randomUUID(); tickets.set(key, { fetch: createSecureFetch({ baseUrl: base.href, clientKind: 'web', serverPublicKey: d.serverPublicKey }), url: url.href, expires: Date.now() + 60000 });

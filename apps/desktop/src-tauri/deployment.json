@@ -1,0 +1,5 @@
+{
+  "env": "prod",
+  "apiBaseUrl": "https://10.23.5.40:8080/c/",
+  "serverSigningPublicKey": "BAKl7N0othcVUzCtDBESu8FU+32TQ+icwU7Tv6Qd1c5L700xI+9XdHts7JL+N9h6LLQyt4vyHLArSFicre0RrhA="
+}

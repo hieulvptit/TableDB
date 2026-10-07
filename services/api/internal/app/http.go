@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -59,19 +60,41 @@ func WriteError(w http.ResponseWriter, log *slog.Logger, err error) {
 	var mbe *http.MaxBytesError
 	switch {
 	case errors.As(err, &ae):
+		logAPIFailure(log, err, ae.Status(), ae.Code)
 		if ae.Code == apperr.StepupRequired {
 			w.Header().Set("X-Stepup", "required")
 		}
 		WriteJSON(w, ae.Status(), errorResponse(ae.Code, ae.Message, ae.Details))
 	case errors.As(err, &ve):
+		fields := make([]any, 0, len(ve.Issues))
+		for _, issue := range ve.Issues {
+			fields = append(fields, issue.Path)
+		}
+		logAPIFailure(log, err, 400, apperr.ValidationCode, "validation_fields", fields)
 		WriteJSON(w, 400, errorResponse(apperr.ValidationCode, "invalid request", ve.Issues))
 	case errors.As(err, &mbe):
+		logAPIFailure(log, err, 400, apperr.ValidationCode, "body_limit_bytes", mbe.Limit)
 		WriteJSON(w, 400, errorResponse(apperr.ValidationCode, "payload too large", nil))
 	default:
-		if log != nil {
-			log.Error("unhandled", "err", err.Error())
-		}
+		logAPIFailure(log, err, 500, apperr.Internal)
 		WriteJSON(w, 500, errorResponse(apperr.Internal, "internal error", nil))
+	}
+}
+
+func logAPIFailure(log *slog.Logger, err error, status int, code apperr.Code, fields ...any) {
+	if log == nil {
+		return
+	}
+	attrs := []any{"status", status, "code", string(code), "error", err, "error_type", fmt.Sprintf("%T", err)}
+	var sqlError interface{ SQLState() string }
+	if errors.As(err, &sqlError) {
+		attrs = append(attrs, "sqlstate", sqlError.SQLState())
+	}
+	attrs = append(attrs, fields...)
+	if status >= 500 {
+		log.Error("API request failed", attrs...)
+	} else {
+		log.Warn("API request rejected", attrs...)
 	}
 }
 
@@ -232,34 +255,38 @@ func (rt *Router) Handle(method, path string, o Opts, h HandlerFunc) {
 	}
 	rt.Mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 		ip := rt.D.ClientIP(r)
+		log := rt.D.Log
+		if log != nil {
+			log = log.With("request_id", w.Header().Get("X-Request-ID"), "method", r.Method, "route", pattern, "ip", ip)
+		}
 		if ok, retry := rt.limiter.Allow(pattern+"|"+ip, rate); !ok {
 			w.Header().Set("Retry-After", itoa(int(retry.Seconds())+1))
-			WriteJSON(w, 429, errorResponse(apperr.RateLimited, "too many requests", nil))
+			WriteError(w, log, apperr.New(apperr.RateLimited, "too many requests"))
 			return
 		}
 		// authenticate before bodies are read (large uploads must not be buffered for anonymous callers)
 		a, err := rt.D.attachAuth(r)
 		if err != nil && !o.Public {
-			WriteError(w, rt.D.Log, err)
+			WriteError(w, log, err)
 			return
 		}
 		if err != nil {
 			a = nil
 		}
 		if a == nil && !o.Public {
-			WriteError(w, rt.D.Log, apperr.Unauth("login required"))
+			WriteError(w, log, apperr.Unauth("login required"))
 			return
 		}
 		if a != nil {
 			if securetransport.IsEncrypted(r.Context()) && securetransport.ClientKind(r.Context()) != string(a.Kind) {
-				WriteError(w, rt.D.Log, apperr.Forbiddenf("secure channel client kind does not match session"))
+				WriteError(w, log, apperr.Forbiddenf("secure channel client kind does not match session"))
 				return
 			}
 			r = r.WithContext(context.WithValue(r.Context(), authKey, a))
 		}
 		r = r.WithContext(reqmeta.With(r.Context(), rt.D.requestMeta(w, r, a)))
 		if err := h(w, r); err != nil {
-			WriteError(w, rt.D.Log, err)
+			WriteError(w, log, err)
 		}
 	})
 }
