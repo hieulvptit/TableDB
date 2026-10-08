@@ -84,21 +84,36 @@ func TestRollingMaxBackups(t *testing.T) {
 	for i := 0; i < 4*1024+10; i++ {
 		_, _ = w.Write(line)
 	}
-	waitFor(t, "backups pruned to 1", func() bool {
+	waitFor(t, "backups pruned to 1 and compressed", func() bool {
 		segs, _ := Segments(dir, "app.log")
-		return len(segs) == 1
+		return len(segs) == 1 && strings.HasSuffix(segs[0].Path, ".gz")
 	})
 }
 
 func TestDailyRotation(t *testing.T) {
 	dir := t.TempDir()
-	w, _ := NewRolling("app.log", Options{Dir: dir, MaxSizeMB: 50, Daily: true})
+	w, err := NewRolling("app.log", Options{Dir: dir, MaxSizeMB: 50, Daily: true})
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer w.Close()
-	_, _ = w.Write([]byte("yesterday\n"))
+	if _, err := w.Write([]byte("yesterday\n")); err != nil {
+		t.Fatal(err)
+	}
 	w.last = time.Now().AddDate(0, 0, -1).Format("2006-01-02") // the date changed since the last write
-	_, _ = w.Write([]byte("today\n"))
-	waitFor(t, "daily segment", func() bool { s, _ := Segments(dir, "app.log"); return len(s) == 1 })
-	b, _ := os.ReadFile(filepath.Join(dir, "app.log"))
+	if _, err := w.Write([]byte("today\n")); err != nil {
+		t.Fatal(err)
+	}
+	// Close only closes the live file; wait for background compression to finish
+	// (the source segment is removed last) before TempDir cleanup can run.
+	waitFor(t, "compressed daily segment", func() bool {
+		s, err := Segments(dir, "app.log")
+		return err == nil && len(s) == 1 && strings.HasSuffix(s[0].Path, ".gz")
+	})
+	b, err := os.ReadFile(filepath.Join(dir, "app.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if string(b) != "today\n" {
 		t.Fatalf("live file after daily rotation: %q", b)
 	}
