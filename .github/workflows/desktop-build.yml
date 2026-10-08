@@ -119,6 +119,7 @@ jobs:
 
   release:
     name: Publish desktop and services release
+    # Branch builds upload artifacts; desktop-v* tag builds also publish a release.
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'desktop-v') && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     needs: [native, linux, api, web-bo]
     runs-on: ubuntu-22.04
