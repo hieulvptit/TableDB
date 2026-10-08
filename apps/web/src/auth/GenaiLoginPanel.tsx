@@ -20,9 +20,9 @@ export default function GenaiLoginPanel({ loginUrl, onDone, api }: { loginUrl: s
   const toast = useToast();
   const [phase, setPhase] = useState<Phase>('idle');
   const running = useRef(false);
-  const [proxyConfigured, setProxyConfigured] = useState(false);
+  const [proxyUrl, setProxyUrl] = useState('http://10.23.5.189:3359');
   const [proxyOpen, setProxyOpen] = useState(false);
-  const [username, setUsername] = useState('');
+  const [username, setUsername] = useState('de_team');
   const [password, setPassword] = useState('');
   const [savingProxy, setSavingProxy] = useState(false);
   const [proxyStatus, setProxyStatus] = useState<ProxyStatus>('checking');
@@ -33,7 +33,8 @@ export default function GenaiLoginPanel({ loginUrl, onDone, api }: { loginUrl: s
     try {
       const result = await desktopCommands.genaiProxyCheck();
       if (!mounted.current) return;
-      setProxyConfigured(!!result.proxyUrl);
+      setProxyUrl(result.proxyUrl ?? '');
+      if (result.username !== undefined) setUsername(result.username);
       setProxyLatency(result.latencyMs ?? null);
       setProxyStatus(result.proxyUrl ? (result.reachable ? 'reachable' : 'unreachable') : 'none');
     } catch {
@@ -46,11 +47,15 @@ export default function GenaiLoginPanel({ loginUrl, onDone, api }: { loginUrl: s
     return () => { mounted.current = false; };
   }, [checkProxy]);
 
+  const usesDefaultAccount = proxyUrl.trim() === 'http://10.23.5.189:3359' && username.trim() === 'de_team';
+  const canSaveProxy = !proxyUrl.trim() || (!!username.trim() && !username.includes(':') && (!!password || usesDefaultAccount));
+
   const saveProxy = async () => {
     setSavingProxy(true);
     try {
-      await desktopCommands.secretSet('proxy.sso.credentials', JSON.stringify({ username: username.trim(), password }));
+      await desktopCommands.secretSet('proxy.sso.credentials', JSON.stringify({ proxyUrl: proxyUrl.trim(), username: username.trim(), password }));
       setPassword('');
+      await checkProxy();
       setProxyOpen(false);
       toast.push(t('login.proxy.saved'), 'success');
     } catch (e) {
@@ -85,17 +90,16 @@ export default function GenaiLoginPanel({ loginUrl, onDone, api }: { loginUrl: s
             <ConnectionIcon state={proxyStatus === 'reachable' ? 'ok' : ['unreachable', 'error'].includes(proxyStatus) ? 'error' : proxyStatus === 'checking' ? 'checking' : 'none'} />
           </Button>
       </div>}
-      {proxyConfigured && (
-        <details open={proxyOpen} onToggle={e => setProxyOpen(e.currentTarget.open)}>
-          <summary>{t('login.proxy.title')}</summary>
-          <div className="ui-col">
+      <details open={proxyOpen} onToggle={e => setProxyOpen(e.currentTarget.open)}>
+          <summary onClick={e => { e.preventDefault(); setProxyOpen(open => !open); }}>{t('login.proxy.title')}</summary>
+          {proxyOpen && <div className="ui-col">
             <small>{t('login.proxy.note')}</small>
+            <label>{t('login.proxy.url')}<input autoComplete="off" maxLength={4096} value={proxyUrl} onChange={e => setProxyUrl(e.target.value)} disabled={phase !== 'idle' || savingProxy} /></label>
             <label>{t('login.proxy.username')}<input autoComplete="off" maxLength={128} value={username} onChange={e => setUsername(e.target.value)} disabled={phase !== 'idle' || savingProxy} /></label>
             <label>{t('login.proxy.password')}<input type="password" autoComplete="new-password" maxLength={256} value={password} onChange={e => setPassword(e.target.value)} disabled={phase !== 'idle' || savingProxy} /></label>
-            <Button onClick={() => void saveProxy()} disabled={!username.trim() || username.includes(':') || !password || phase !== 'idle'} loading={savingProxy}>{t('login.proxy.save')}</Button>
-          </div>
-        </details>
-      )}
+            <Button onClick={() => void saveProxy()} disabled={!canSaveProxy || phase !== 'idle'} loading={savingProxy}>{t('login.proxy.save')}</Button>
+          </div>}
+      </details>
       {loginUrl && <Button variant="primary" onClick={() => void start()} loading={phase !== 'idle'} disabled={phase !== 'idle' || savingProxy || !!api?.loading || !!api?.error}>{t('login.genai.button')}</Button>}
       {phase !== 'idle' && (
         <div className="ui-row" role="status"><Spinner label="" /> {phase === 'waiting' ? t('login.genai.waiting') : t('login.genai.exchanging')}</div>

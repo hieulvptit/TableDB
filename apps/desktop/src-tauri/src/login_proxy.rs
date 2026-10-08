@@ -16,6 +16,55 @@ use tokio::{
 use url::Url;
 
 pub const CREDENTIAL_KEY: &str = "proxy.sso.credentials";
+pub const DEFAULT_PROXY_URL: &str = "http://10.23.5.189:3359";
+pub const DEFAULT_PROXY_USERNAME: &str = "de_team";
+
+/// Password is supplied by the build environment, never by the WebView or public API.
+pub fn default_proxy_password() -> &'static str {
+    option_env!("TABLEDB_SSO_PROXY_PASSWORD").unwrap_or("")
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SavedProxy {
+    /// Missing preserves legacy credentials; an empty URL explicitly selects direct SSO.
+    pub proxy_url: Option<String>,
+    pub username: String,
+    pub password: String,
+}
+
+impl SavedProxy {
+    pub fn parse(raw: &str) -> Result<Self, AppError> {
+        let saved: Self = serde_json::from_str(raw)
+            .map_err(|_| AppError::bad_request("invalid SSO proxy settings"))?;
+        if let Some(url) = saved.proxy_url.as_deref() {
+            if url.is_empty() { return Ok(saved); }
+            validate_proxy(url)?;
+            if url == DEFAULT_PROXY_URL && saved.username == DEFAULT_PROXY_USERNAME && saved.password.is_empty() {
+                return Ok(saved);
+            }
+        }
+        Credentials::parse(&serde_json::json!({"username": saved.username, "password": saved.password}).to_string())?;
+        Ok(saved)
+    }
+
+    pub fn effective_url(&self, configured: Option<&str>) -> Option<String> {
+        match self.proxy_url.as_deref() {
+            Some("") => None,
+            Some(url) => Some(url.to_string()),
+            None => configured.map(str::to_string),
+        }
+    }
+}
+
+pub fn login_credentials(saved: Option<&SavedProxy>, upstream: &str, default_password: &str) -> Result<Credentials, AppError> {
+    let (username, password) = match saved {
+        Some(s) if !s.password.is_empty() => (s.username.as_str(), s.password.as_str()),
+        _ if upstream == DEFAULT_PROXY_URL => (DEFAULT_PROXY_USERNAME, default_password),
+        _ => return Err(AppError::new("E_PROXY_AUTH_REQUIRED", "save SSO proxy username and password first")),
+    };
+    Credentials::parse(&serde_json::json!({"username": username, "password": password}).to_string())
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -354,6 +403,35 @@ pub fn open_browser(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_credentials_are_scoped_to_default_proxy() {
+        let c = login_credentials(None, DEFAULT_PROXY_URL, "test-build-password").unwrap();
+        assert_eq!(c.username, DEFAULT_PROXY_USERNAME);
+        assert_eq!(c.password, "test-build-password");
+        assert!(login_credentials(None, "http://other-proxy:3359", "test-build-password").is_err());
+        assert!(login_credentials(None, DEFAULT_PROXY_URL, "").is_err());
+    }
+
+    #[test]
+    fn custom_and_legacy_proxy_settings_override_defaults() {
+        let custom = SavedProxy::parse(r#"{"proxyUrl":"http://custom:3128","username":"custom-user","password":"custom-password"}"#).unwrap();
+        assert_eq!(custom.effective_url(Some(DEFAULT_PROXY_URL)).as_deref(), Some("http://custom:3128"));
+        let c = login_credentials(Some(&custom), "http://custom:3128", "default-password").unwrap();
+        assert_eq!(c.username, "custom-user");
+        assert_eq!(c.password, "custom-password");
+        let legacy = SavedProxy::parse(r#"{"username":"legacy-user","password":"legacy-password"}"#).unwrap();
+        assert_eq!(legacy.effective_url(Some(DEFAULT_PROXY_URL)).as_deref(), Some(DEFAULT_PROXY_URL));
+        assert_eq!(login_credentials(Some(&legacy), DEFAULT_PROXY_URL, "default-password").unwrap().username, "legacy-user");
+        let direct = SavedProxy::parse(r#"{"proxyUrl":"","username":"","password":""}"#).unwrap();
+        assert!(direct.effective_url(Some(DEFAULT_PROXY_URL)).is_none());
+        for url in ["https://custom:3128", "http://user:password@custom:3128", "http://custom:3128/path"] {
+            assert!(SavedProxy::parse(&serde_json::json!({"proxyUrl":url,"username":"u","password":"p"}).to_string()).is_err());
+        }
+        assert!(SavedProxy::parse(r#"{"proxyUrl":"http://custom:3128","username":"u","password":""}"#).is_err());
+        let default = SavedProxy::parse(&serde_json::json!({"proxyUrl":DEFAULT_PROXY_URL,"username":DEFAULT_PROXY_USERNAME,"password":""}).to_string()).unwrap();
+        assert_eq!(login_credentials(Some(&default), DEFAULT_PROXY_URL, "build-password").unwrap().password, "build-password");
+    }
 
     #[tokio::test]
     async fn tcp_probe_reports_open_closed_and_unconfigured_proxy() {

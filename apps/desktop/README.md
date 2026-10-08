@@ -57,10 +57,20 @@ Server defaults use the SSO-only proxy `http://10.23.5.189:3359` via
 `genaiProxyUrl` in server `DESKTOP_CONFIG`. This setting
 does not route the TableDB API or JDBC connections through that proxy. Change this setting on the server; desktop installations retrieve it at startup.
 
-On the login screen, expand **SSO login proxy**, enter the proxy username/password,
-and save them once. They are stored as `proxy.sso.credentials` in Windows Credential
+Desktop builds use `http://10.23.5.189:3359` with username `de_team` by default,
+without requiring users to expand **SSO login proxy**. Set the repository Actions
+secret `TABLEDB_SSO_PROXY_PASSWORD` before building. The password is compiled into
+the native app and can be extracted from installers; it is never included in the
+frontend, public API config, source or CI logs. Local builds can supply the same
+build environment variable.
+
+To use another proxy, expand **SSO login proxy**, enter its URL, username and
+password, and save. Leave the URL empty to select direct SSO. To restore the
+default account, enter the default URL and `de_team`, leaving the password empty.
+Custom settings are stored together as `proxy.sso.credentials` in Windows Credential
 Manager, macOS Keychain, or Linux Secret Service (an unlocked desktop keyring is
-required on Linux). They are never included in config.json, source, CI logs or installers.
+required on Linux). They override server SSO proxy settings and survive app restarts.
+Existing saved credentials remain supported. Passwords are never returned to the WebView.
 
 The login screen automatically checks the proxy TCP port with a three-second timeout.
 The proxy indicator is an icon: green when reachable, orange while checking, and red

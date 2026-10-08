@@ -113,7 +113,7 @@ pub fn webview_secret_readable(key: &str) -> Result<(), AppError> {
 pub async fn secret_set(state: State<'_, AppState>, key: String, value: String) -> Result<(), AppError> {
     webview_secret_key(&key)?;
     if key == crate::login_proxy::CREDENTIAL_KEY {
-        crate::login_proxy::Credentials::parse(&value)?;
+        crate::login_proxy::SavedProxy::parse(&value)?;
     }
     vault_op(&state, move |v| v.set(&key, &value)).await
 }
@@ -188,10 +188,21 @@ impl Drop for BusyGuard<'_> {
     }
 }
 
-/// Probe only the configured SSO proxy, never an arbitrary address from the WebView.
+async fn saved_sso_proxy(state: &AppState) -> Result<Option<crate::login_proxy::SavedProxy>, AppError> {
+    let raw = vault_op(state, |v| v.get(crate::login_proxy::CREDENTIAL_KEY)).await?;
+    raw.as_deref().map(crate::login_proxy::SavedProxy::parse).transpose()
+}
+
+/// Probe the saved user proxy or the server default.
 #[tauri::command]
-pub async fn genai_proxy_check(state: State<'_, AppState>) -> Result<crate::login_proxy::ProxyCheck, AppError> {
-    crate::login_proxy::check_connectivity(state.deployment().await?.config.genai_proxy_url.as_deref()).await
+pub async fn genai_proxy_check(state: State<'_, AppState>) -> Result<Value, AppError> {
+    let deployment = state.deployment().await?;
+    let saved = saved_sso_proxy(&state).await?;
+    let url = saved.as_ref().map(|s| s.effective_url(deployment.config.genai_proxy_url.as_deref()))
+        .unwrap_or_else(|| deployment.config.genai_proxy_url.clone());
+    let check = crate::login_proxy::check_connectivity(url.as_deref()).await?;
+    let username = saved.as_ref().map(|s| s.username.as_str()).unwrap_or(crate::login_proxy::DEFAULT_PROXY_USERNAME);
+    Ok(json!({"proxyUrl": check.proxy_url, "username": username, "reachable": check.reachable, "latencyMs": check.latency_ms}))
 }
 
 /// VNPAY SSO broker login (loopback listener + secret callback path). Shares the busy flag with `oidc_begin`.
@@ -209,20 +220,19 @@ pub async fn genai_login_begin(app: AppHandle, state: State<'_, AppState>, mut p
     log::info!("genai_login_begin (host {})", url::Url::parse(&params.login_url).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_default());
     // Keep proxy setup inside the result future so the cancellation sender is cleared on every error.
     let res = async {
-        let upstream = crate::login_proxy::reachable_login_proxy(config.genai_proxy_url.as_deref()).await?;
+        let saved = saved_sso_proxy(&state).await?;
+        let proxy_url = saved.as_ref().map(|s| s.effective_url(config.genai_proxy_url.as_deref()))
+            .unwrap_or_else(|| config.genai_proxy_url.clone());
+        let upstream = crate::login_proxy::reachable_login_proxy(proxy_url.as_deref()).await?;
         let proxy_bridge = if let Some(upstream) = upstream {
-            let vault = state.vault.clone();
-            let raw = tokio::task::spawn_blocking(move || vault.get(crate::login_proxy::CREDENTIAL_KEY)).await
-                .map_err(|_| AppError::new("E_SECRET_STORE", "cannot read proxy credentials"))??
-                .ok_or_else(|| AppError::new("E_PROXY_AUTH_REQUIRED", "save SSO proxy username and password first"))?;
-            let credentials = crate::login_proxy::Credentials::parse(&raw)?;
+            let credentials = crate::login_proxy::login_credentials(saved.as_ref(), upstream, crate::login_proxy::default_proxy_password())?;
             Some(crate::login_proxy::LoginProxy::start(
                 crate::login_proxy::validate_proxy(upstream)?, Some(credentials), &config.genai_login_origins,
             ).await?)
         } else { None };
         // A configured but unreachable SSO proxy must fall back to direct access,
         // rather than accidentally reusing the general API proxy.
-        let browser_proxy = if config.genai_proxy_url.is_some() {
+        let browser_proxy = if proxy_url.is_some() || saved.is_some() {
             proxy_bridge.as_ref().map(|p| p.url.as_str())
         } else {
             config.proxy.url.as_deref()

@@ -56,7 +56,12 @@ runs:
         BUILD_TARGET: ${{ inputs.target }}
         BUILD_BUNDLES: ${{ inputs.bundles }}
         APPLE_SIGNING_IDENTITY: '-'
+        TABLEDB_SSO_PROXY_PASSWORD: ${{ env.TABLEDB_SSO_PROXY_PASSWORD }}
       run: |
+        if [[ -z "$TABLEDB_SSO_PROXY_PASSWORD" ]]; then
+          echo "Repository secret TABLEDB_SSO_PROXY_PASSWORD is required for default SSO proxy authentication" >&2
+          exit 1
+        fi
         if [[ "$BUILD_TARGET" == *-linux-* && ",$BUILD_BUNDLES," == *,appimage,* ]]; then
           # linuxdeploy scans the bundled JRE; JNI libraries depend on libjvm.so
           # in lib/server, which is outside the system linker search path.

@@ -23,15 +23,16 @@ it('saves proxy credentials only through the vault and clears the password field
   render(<ToastProvider><GenaiLoginPanel loginUrl="https://genai.vnpay.vn/create-jwt-token" onDone={() => {}} /></ToastProvider>);
   await screen.findByText(t('login.proxy.title'));
   fireEvent.click(screen.getByText(t('login.proxy.title')));
-  expect(document.body.innerHTML).not.toContain('proxy.test');
-  expect(document.body.innerHTML).not.toContain('3359');
+  expect(screen.getByLabelText(t('login.proxy.url'))).toHaveValue('http://proxy.test:3359');
   fireEvent.change(screen.getByLabelText(t('login.proxy.username')), { target: { value: 'test-user' } });
   fireEvent.change(screen.getByLabelText(t('login.proxy.password')), { target: { value: 'test-proxy-password' } });
   fireEvent.click(screen.getByRole('button', { name: t('login.proxy.save') }));
   await waitFor(() => expect(invoke).toHaveBeenCalledWith('secret_set', {
-    key: 'proxy.sso.credentials', value: JSON.stringify({ username: 'test-user', password: 'test-proxy-password' }),
+    key: 'proxy.sso.credentials', value: JSON.stringify({ proxyUrl: 'http://proxy.test:3359', username: 'test-user', password: 'test-proxy-password' }),
   }));
-  await waitFor(() => expect(screen.getByLabelText(t('login.proxy.password'))).toHaveValue(''));
+  await waitFor(() => expect(screen.queryByLabelText(t('login.proxy.password'))).toBeNull());
+  fireEvent.click(screen.getByText(t('login.proxy.title')));
+  expect(screen.getByLabelText(t('login.proxy.password'))).toHaveValue('');
   expect(invoke.mock.calls.some(([command]) => command === 'secret_get')).toBe(false);
   expect(JSON.stringify(localStorage)).not.toContain('test-proxy-password');
 });
@@ -79,4 +80,36 @@ it.each(['unreachable', 'error'] as const)('starts SSO when the proxy check is %
     params: { loginUrl: 'https://genai.vnpay.vn/create-jwt-token' },
   }));
   await waitFor(() => expect(login).toBeEnabled());
+});
+
+
+it('lets users save a custom proxy URL and credentials', async () => {
+  const invoke = vi.fn(async (command: string) => command === 'genai_proxy_check' ? { proxyUrl: 'http://10.23.5.189:3359', reachable: true, latencyMs: 5 } : undefined);
+  (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = { invoke };
+  render(<ToastProvider><GenaiLoginPanel loginUrl="https://genai.vnpay.vn/create-jwt-token" onDone={() => {}} /></ToastProvider>);
+  await screen.findByRole('button', { name: `${t('login.proxy.retry')}: ${t('login.proxy.reachable')}` });
+  expect(screen.queryByLabelText(t('login.proxy.url'))).toBeNull();
+  fireEvent.click(screen.getByText(t('login.proxy.title')));
+  expect(screen.getByLabelText(t('login.proxy.username'))).toHaveValue('de_team');
+  fireEvent.change(screen.getByLabelText(t('login.proxy.url')), { target: { value: 'http://custom-proxy:3128' } });
+  fireEvent.change(screen.getByLabelText(t('login.proxy.username')), { target: { value: 'custom-user' } });
+  expect(screen.getByRole('button', { name: t('login.proxy.save') })).toBeDisabled();
+  fireEvent.change(screen.getByLabelText(t('login.proxy.password')), { target: { value: 'custom-password' } });
+  fireEvent.click(screen.getByRole('button', { name: t('login.proxy.save') }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith('secret_set', {
+    key: 'proxy.sso.credentials', value: JSON.stringify({ proxyUrl: 'http://custom-proxy:3128', username: 'custom-user', password: 'custom-password' }),
+  }));
+});
+
+it('can select direct SSO without proxy credentials when the server has no proxy', async () => {
+  const invoke = vi.fn(async (command: string) => command === 'genai_proxy_check' ? { proxyUrl: null, reachable: true, latencyMs: null } : undefined);
+  (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = { invoke };
+  render(<ToastProvider><GenaiLoginPanel loginUrl="https://genai.vnpay.vn/create-jwt-token" onDone={() => {}} /></ToastProvider>);
+  await waitFor(() => expect(screen.queryByRole('button', { name: new RegExp(t('login.proxy.retry')) })).toBeNull());
+  fireEvent.click(screen.getByText(t('login.proxy.title')));
+  expect(screen.getByLabelText(t('login.proxy.url'))).toHaveValue('');
+  fireEvent.click(screen.getByRole('button', { name: t('login.proxy.save') }));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith('secret_set', {
+    key: 'proxy.sso.credentials', value: JSON.stringify({ proxyUrl: '', username: 'de_team', password: '' }),
+  }));
 });
