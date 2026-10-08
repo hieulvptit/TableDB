@@ -5,6 +5,7 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,21 @@ ROOT = Path(__file__).resolve().parents[2]
 DESKTOP = ROOT / "apps/desktop"
 TAURI = DESKTOP / "src-tauri"
 JDBC = ROOT / "services/jdbc/target"
+
+
+def validate():
+    api_origin()
+    version = json.loads((TAURI / "tauri.conf.json").read_text())["version"]
+    package = json.loads((DESKTOP / "package.json").read_text())
+    lock = json.loads((DESKTOP / "package-lock.json").read_text())
+    cargo_version = re.search(r'^version = "([^"]+)"', (TAURI / "Cargo.toml").read_text(), re.M).group(1)
+    cargo_lock_version = re.search(r'name = "tabledb-desktop"\nversion = "([^"]+)"', (TAURI / "Cargo.lock").read_text()).group(1)
+    if any(value != version for value in [package["version"], lock["version"],
+                                         lock["packages"][""]["version"], cargo_version, cargo_lock_version]):
+        raise ValueError("Desktop versions in Tauri, npm and Cargo must match")
+    if os.environ.get("GITHUB_REF_TYPE") == "tag":
+        if os.environ.get("GITHUB_REF_NAME") != f"desktop-v{version}":
+            raise ValueError(f"Desktop release tag must match app version: desktop-v{version}")
 
 
 def api_origin():
@@ -149,5 +165,5 @@ def collect():
 
 
 if __name__ == "__main__":
-    commands = {"validate": api_origin, "prepare": prepare, "verify-appimage": verify_appimage, "collect": collect}
+    commands = {"validate": validate, "prepare": prepare, "verify-appimage": verify_appimage, "collect": collect}
     commands[sys.argv[1]]()

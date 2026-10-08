@@ -98,8 +98,9 @@ The deployment sample uses `genaiLoginBrowser: "internal"`: an in-app login popu
 with a dedicated profile and the session CONNECT bridge as its proxy. The broker's
 localhost callback is intercepted inside the popup; no external browser is opened.
 If an identity provider refuses embedded browsers, explicitly set
-`genaiLoginBrowser: "system"` on the server to use a separate Chrome/Edge process
-with an app-specific profile and proxy. Install Chrome/Edge (or Chromium on Linux)
+`genaiLoginBrowser: "system"` on the server to use a separate Chrome/Edge popup
+(`--app`) with an app-specific profile and proxy. The proxy argument uses
+`http://host:port` without a trailing slash, as required by Chromium. Install Chrome/Edge (or Chromium on Linux)
 for that mode. The app closes that login browser when
 the flow ends; **Forget SSO** also clears its separate profile. Normal browser
 profiles and OS proxy settings are unchanged. Google may refuse embedded browsers.

@@ -357,12 +357,24 @@ impl Drop for LoginBrowser {
     }
 }
 
+fn browser_proxy_server(proxy: &Url) -> Result<String, AppError> {
+    // Chromium expects a proxy authority, not a URL path. Url::as_str()
+    // adds a trailing slash, which makes --proxy-server invalid.
+    let proxy = validate_proxy(proxy.as_str())?;
+    Ok(format!(
+        "http://{}:{}",
+        proxy.host_str().unwrap(),
+        proxy.port_or_known_default().unwrap()
+    ))
+}
+
 pub fn open_browser(
     url: &str,
     proxy: &Url,
     profile: &Path,
     persist: bool,
 ) -> Result<LoginBrowser, AppError> {
+    let proxy_server = browser_proxy_server(proxy)?;
     let mut candidates = Vec::new();
     #[cfg(target_os = "macos")]
     candidates.extend([
@@ -402,13 +414,12 @@ pub fn open_browser(
         let mut command = Command::new(candidate);
         command
             .arg(format!("--user-data-dir={}", profile.display()))
-            .arg(format!("--proxy-server={}", proxy.as_str()))
+            .arg(format!("--proxy-server={proxy_server}"))
             .args([
                 "--no-first-run",
                 "--no-default-browser-check",
                 "--disable-background-networking",
                 "--disable-quic",
-                "--new-window",
             ])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -416,7 +427,8 @@ pub fn open_browser(
         if !persist {
             command.arg("--incognito");
         }
-        if let Ok(child) = command.arg(url).spawn() {
+        // App mode gives SSO its own popup without the normal browser tabs/toolbars.
+        if let Ok(child) = command.arg(format!("--app={url}")).spawn() {
             return Ok(LoginBrowser(child));
         }
     }
@@ -429,6 +441,28 @@ pub fn open_browser(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chromium_proxy_uses_authority_without_url_path() {
+        for (raw, expected) in [
+            ("http://127.0.0.1:49704", "http://127.0.0.1:49704"),
+            ("http://127.0.0.1:49704/", "http://127.0.0.1:49704"),
+            ("http://proxy.local", "http://proxy.local:80"),
+            ("http://[::1]:3359/", "http://[::1]:3359"),
+        ] {
+            assert_eq!(
+                browser_proxy_server(&Url::parse(raw).unwrap()).unwrap(),
+                expected
+            );
+        }
+        for raw in [
+            "http://user:password@proxy:3359",
+            "http://proxy:3359/path",
+            "socks5://proxy:1080",
+        ] {
+            assert!(browser_proxy_server(&Url::parse(raw).unwrap()).is_err());
+        }
+    }
 
     #[tokio::test]
     async fn authenticated_check_distinguishes_success_auth_and_target_errors() {
