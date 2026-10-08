@@ -3,7 +3,7 @@
 .DESCRIPTION
   Produces src-tauri\target\release\bundle\nsis\*.exe (+ .sig / latest.json inputs when updater signing is configured).
   The CSP in tauri.conf.json is static, so the API origin is injected here via a generated --config override.
-.PARAMETER ApiOrigin        API base URL, e.g. https://10.23.5.40:8080/c/ (optional deployment path prefix)
+.PARAMETER ApiOrigin        API base URL, e.g. http://10.23.5.40:8080/c/ (optional deployment path prefix)
 .PARAMETER UpdaterPubkey    Public key from `tauri signer generate` (contents of the .pub file). Enables updater artifacts together with
                             $env:TAURI_SIGNING_PRIVATE_KEY (+ TAURI_SIGNING_PRIVATE_KEY_PASSWORD).
 .PARAMETER UpdaterEndpoint  https URL template of the update manifest, e.g. https://updates.vnpay.vn/tabledb/{{target}}-{{arch}}/{{current_version}}

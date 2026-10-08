@@ -38,7 +38,7 @@ navigation of the main window is pinned to the app origin. Desktop API envelopes
 
 ## Configuration
 
-The native binary embeds the API base URL and public signing key from `src-tauri/deployment.json` at build time (default API: `https://10.23.5.40:8080/c/`). Local files and environment variables cannot override bootstrap addresses, trust or environment. Startup always uses the embedded deployment without reading local files. The app does not create, read or write `config.json` or `config.sample.json`. Desktop runs only in `prod` and uses the fixed `vn.vnpay.tabledb.prod` credential-manager namespace.
+The native binary embeds the API base URL and public signing key from `src-tauri/deployment.json` at build time (default API: `http://10.23.5.40:8080/c/`). Local files and environment variables cannot override bootstrap addresses, trust or environment. Startup always uses the embedded deployment without reading local files. The app does not create, read or write `config.json` or `config.sample.json`. Desktop runs only in `prod` and uses the fixed `vn.vnpay.tabledb.prod` credential-manager namespace.
 
 Rust retrieves desktop settings (SSO proxy/browser/origins, general proxy, Java heap and timeouts) from `/api/v1/desktop/config` through secure transport. Agent endpoints and runtime settings come from `/api/v1/agent/config` after sign-in. These settings remain in memory and are never written to local config.json. Restart the app to pick up server deployment changes. Embedded addresses can still be extracted from a binary; this prevents plaintext local configuration disclosure, not reverse engineering.
 
@@ -93,7 +93,7 @@ NSIS is downloaded by Tauri automatically.
 ```powershell
 mvn -f services/jdbc/pom.xml package                    # -> services/jdbc/target/tabledb-jdbc.jar
 cd apps/desktop
-./scripts/build-desktop.ps1 -ApiOrigin https://tabledb-api.vnpay.vn   # jlink JRE -> stage sidecar -> web build -> tauri build (NSIS)
+./scripts/build-desktop.ps1 -ApiOrigin http://10.23.5.40:8080/c/   # jlink JRE -> stage sidecar -> web build -> tauri build (NSIS)
 ```
 
 Output: `src-tauri/target/release/bundle/nsis/VNPAY TableDB_<ver>_x64-setup.exe` (per-user install, no admin). Steps can be run/skipped separately:
@@ -120,7 +120,7 @@ jdk.unsupported, jdk.httpserver, jdk.crypto.ec, jdk.naming.dns` (modules missing
 | `tabledb-ubuntu-x64` | Ubuntu 22.04 container, x64 | `.deb`, `.AppImage` |
 | `tabledb-debian-x64` | Debian 12 container, x64 | `.deb` |
 
-The default deployment API is `https://10.23.5.40:8080/c/`. To build for another deployment, choose **Actions → Desktop builds → Run workflow** and set the optional `api_origin` input. The default does not use the old `TABLEDB_API_ORIGIN` repository variable. HTTPS is accepted for any host; HTTP is accepted for localhost, loopback IPs and RFC1918 private IPv4 addresses. Pushes to `main`, tags matching `desktop-v*`, and relevant pull requests also trigger builds.
+The default deployment API is `http://10.23.5.40:8080/c/`. To build for another deployment, choose **Actions → Desktop builds → Run workflow** and set the optional `api_origin` input. The default does not use the old `TABLEDB_API_ORIGIN` repository variable. HTTPS is accepted for any host; HTTP is accepted for localhost, loopback IPs and RFC1918 private IPv4 addresses. Pushes to `main`, tags matching `desktop-v*`, and relevant pull requests also trigger builds.
 
 The shared assets job uses the root npm lockfile, builds the SPA with `VITE_TARGET=desktop`,
 tests/builds the JDBC jar and fetches the pinned JDBC drivers with checksum verification.

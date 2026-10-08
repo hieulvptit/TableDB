@@ -46,7 +46,7 @@ concurrency:
 env:
   TABLEDB_SERVER_SIGNING_PUBLIC_KEY: ${{ vars.TABLEDB_SERVER_SIGNING_PUBLIC_KEY }}
   VITE_SECURE_WEB_PUBLIC_KEY: ${{ vars.VITE_SECURE_WEB_PUBLIC_KEY }}
-  API_ORIGIN: ${{ inputs.api_origin || 'https://10.23.5.40:8080/c/' }}
+  API_ORIGIN: ${{ inputs.api_origin || 'http://10.23.5.40:8080/c/' }}
 
 jobs:
   assets:
