@@ -5,7 +5,7 @@ Mã nguồn **không** tự suy đoán các mục dưới đây; mỗi mục có
 ## 1. VNPAY LLM Agent
 | Cần | Chi tiết | Ảnh hưởng / nơi cấu hình |
 |---|---|---|
-| Base URL, đường dẫn chat/completions, đường dẫn kiểm tra token | có tương thích OpenAI không? | mục `agent.endpoints` trong `config.json` của desktop (mẫu: `apps/desktop/src-tauri/config.sample.json`; `agent.authHeader`/`agent.authScheme` nếu gateway không dùng `Authorization: Bearer`) |
+| Base URL, đường dẫn chat/completions, đường dẫn kiểm tra token | có tương thích OpenAI không? | cấu hình `AGENT_CONFIG` trên server (`endpoints`, `authHeader`/`authScheme` nếu gateway không dùng `Authorization: Bearer`) |
 | Cách xác thực | header nào (Authorization: Bearer / khác), định dạng token, thời hạn, cách thu hồi | mapping `authHeader/authScheme` |
 | Danh sách model được phép | id, giới hạn context (token), giới hạn tốc độ | `PUT /agent/settings` |
 | Hỗ trợ streaming? | SSE hay không | hiện chỉ non-streaming |

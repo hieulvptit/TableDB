@@ -15,7 +15,7 @@ cd apps\desktop; .\scripts\build-desktop.ps1 -ApiOrigin https://bo-test.example.
 ```
 Chi tiết, tham số ký mã (`-CertThumbprint`) và updater: `apps/desktop/README.md`. CSP `connect-src` được ghim vào bản build theo `-ApiOrigin`; mỗi môi trường (test/prod) build một bộ cài riêng.
 
-**Cấu hình người dùng** (`%APPDATA%\vn.vnpay.tabledb\config.json`, mẫu `config.sample.json`): `env`, `apiBaseUrl`, `proxy.url` (tùy chọn). Không chứa secret. Secret (mật khẩu DB, refresh token) nằm trong Windows Credential Manager.
+**Cấu hình desktop**: API và khóa public nhúng trong `deployment.json`; chỉ có môi trường `prod`. Desktop không dùng file cấu hình local. SSO, proxy và Agent lấy từ server. Secret (mật khẩu DB, refresh token) nằm trong Windows Credential Manager.
 
 **Cài hàng loạt:** `TableDB-Setup.exe /S` (NSIS silent); phân phối qua SCCM/Intune; cập nhật bằng updater Tauri (cần `pubkey` + endpoint thật, chưa có trong repo).
 

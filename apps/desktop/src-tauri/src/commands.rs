@@ -22,7 +22,6 @@ pub struct AppState {
     pub api_transport: crate::api_transport::ApiTransport,
     pub agent_config: std::sync::RwLock<Option<crate::config::AgentConfig>>,
     pub config_error: Option<String>,
-    pub config_path: String,
     pub sidecar: Arc<SidecarManager>,
     pub oidc_busy: AtomicBool,
     /// Cancel handle of the in-flight genai login (if any).
@@ -285,7 +284,6 @@ pub struct AppInfo {
     api_base_url: String,
     proxy_url: Option<String>,
     genai_proxy_url: Option<String>,
-    config_path: String,
     config_error: Option<String>,
     csp_allows_api: bool,
     sidecar: Option<Value>,
@@ -306,7 +304,6 @@ pub fn app_info(app: AppHandle, state: State<'_, AppState>) -> AppInfo {
         api_base_url: state.config.api_base_url.clone(),
         proxy_url: state.config.proxy.url.clone(),
         genai_proxy_url: state.config.genai_proxy_url.clone(),
-        config_path: state.config_path.clone(),
         config_error: state.config_error.clone(),
         csp_allows_api,
         sidecar: state.sidecar.ready_info(),
@@ -515,7 +512,7 @@ impl AppState {
 #[tauri::command]
 pub async fn desktop_config(state: State<'_, AppState>) -> Result<Value, AppError> {
  let d = state.deployment().await.map_err(|error| {
-  log::error!("desktop_config failed: config_path={} code={} error={}", state.config_path, error.code, crate::redact::redact(&error.message));
+  log::error!("desktop_config failed: code={} error={}", error.code, crate::redact::redact(&error.message));
   error
  })?;
  let mode = if crate::api_transport::effective_proxy(&state.config.api_base_url, d.config.proxy.url.as_deref()).is_some() { "proxy" } else { "direct" };

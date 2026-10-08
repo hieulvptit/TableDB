@@ -26,7 +26,7 @@ else
 fi
 
 # OpenMetadata MCP demo cho Agent (chỉ endpoint; mỗi user tự nhập token cá nhân trong panel Agent). Đặt TABLEDB_OPENMETADATA_MCP_URL="" để tắt.
-# LLM endpoint nằm ở mục "agent" của config.json (mẫu: apps/desktop/src-tauri/config.sample.json).
+# LLM endpoint được cấu hình trên server qua AGENT_CONFIG.
 export TABLEDB_OPENMETADATA_MCP_URL="${TABLEDB_OPENMETADATA_MCP_URL-https://open-medata.backendoffice.vn/mcp}"
 [[ -n "$TABLEDB_OPENMETADATA_MCP_URL" ]] || unset TABLEDB_OPENMETADATA_MCP_URL
 

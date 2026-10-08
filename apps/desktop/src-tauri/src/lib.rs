@@ -18,7 +18,7 @@ pub mod urlcheck;
 pub mod workspace_store;
 
 use commands::{AppState, TauriSink};
-use config::{AppConfig, OsEnv};
+use config::AppConfig;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
@@ -79,50 +79,16 @@ pub fn run() {
         })
         .setup(|app| {
             // ---- config ----
-            let dir = app.path().app_config_dir()?;
-            let cfg_path = dir.join("config.json");
-            if let Err(error) = std::fs::create_dir_all(&dir) {
-                log::warn!("cannot create bootstrap config directory {}: {}", dir.display(), error);
-            }
-            let sample = dir.join("config.sample.json");
-            if let Err(error) = std::fs::write(&sample, config::SAMPLE) {
-                log::warn!("cannot write local config sample {}: {}", sample.display(), error);
-            }
-            // Persist only non-network settings. Deployment addresses remain embedded.
-            match std::fs::OpenOptions::new().write(true).create_new(true).open(&cfg_path) {
-                Ok(mut file) => {
-                    use std::io::Write;
-                    if let Err(error) = file.write_all(config::SAMPLE.as_bytes()) {
-                        log::warn!("cannot write local config {}: {}", cfg_path.display(), error);
-                    }
-                    log::info!("created local bootstrap config: {}", cfg_path.display());
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => log::warn!("cannot persist bootstrap config {}; embedded deployment will be used if file is missing: {}", cfg_path.display(), error),
-            }
-            let loaded = match std::fs::read_to_string(&cfg_path) {
-                Ok(file) => AppConfig::resolve_bootstrap(Some(&file), &OsEnv),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    log::warn!("local bootstrap config missing at {}; using embedded deployment", cfg_path.display());
-                    AppConfig::resolve_bootstrap(None, &OsEnv)
-                }
-                Err(error) => Err(error::AppError::new("E_DESKTOP_BOOTSTRAP", format!("Cannot read bootstrap config {}: {}", cfg_path.display(), error))),
-            };
+            let loaded = AppConfig::resolve_bootstrap();
             let (cfg, cfg_err) = match loaded {
-                Ok(c) => {
-                    // Remove legacy API, proxy and Agent addresses from existing installs.
-                    if let Err(error) = std::fs::write(&cfg_path, config::SAMPLE) {
-                        log::warn!("cannot migrate local config {}: {}", cfg_path.display(), error);
-                    }
-                    (c, None)
-                },
+                Ok(c) => (c, None),
                 Err(e) => {
                     log::error!("config error: {}", e.message);
                     (AppConfig::default(), Some(e.message))
                 }
             };
             log::info!("TableDB desktop {} starting (env {})", app.package_info().version, cfg.env);
-            log::info!("desktop bootstrap: config_path={} api={} valid={}", cfg_path.display(), redact::redact(&cfg.api_base_url), cfg_err.is_none());
+            log::info!("desktop bootstrap: api={} valid={}", redact::redact(&cfg.api_base_url), cfg_err.is_none());
 
             // ---- sidecar (lazy) ----
             let resource_dir = app.path().resource_dir()?;
@@ -145,7 +111,7 @@ pub fn run() {
             }
             let mgr = sidecar::SidecarManager::new(spec, Arc::new(TauriSink(app.handle().clone())));
 
-            let vault = Arc::new(secrets::Vault::new(secrets::service_name(&cfg.env)));
+            let vault = Arc::new(secrets::Vault::new(secrets::service_name("prod")));
             let workspace = Arc::new(workspace_store::WorkspaceStore::new(
                 app.path().app_data_dir()?.join("workspace.bin"),
                 Box::new(workspace_store::VaultKey(vault.clone())),
@@ -159,7 +125,6 @@ pub fn run() {
                 api_transport: crate::api_transport::ApiTransport::default(),
                 agent_config: std::sync::RwLock::new(None),
                 config_error: cfg_err,
-                config_path: cfg_path.display().to_string(),
                 sidecar: mgr,
                 oidc_busy: AtomicBool::new(false),
                 genai_cancel: std::sync::Mutex::new(None),

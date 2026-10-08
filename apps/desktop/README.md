@@ -15,7 +15,7 @@ Rust core + WebView hosting the React SPA (`apps/web`, build output `apps/web/di
 | `genai_login_forget()` | Deletes the persisted SSO profile of the login window so the next login asks for credentials again. Refused while a login is running (`E_GENAI_BUSY`). Windows/Linux: removes `<app_local_data_dir>/genai-login-webview` (best effort, not-found is fine). macOS: WKWebView ignores `data_directory` and keys its store by identifier (macOS 14+), so the store is cleared through a short-lived hidden window using the same identifier. |
 | `genai_login_cancel()` | Aborts the in-flight `genai_login_begin` (it then fails with `E_GENAI_CANCELLED`) and closes the login window. |
 | `open_external(url)` | http/https only, no credentials/control chars. |
-| `app_info()` | version, log dir, env, apiBaseUrl, proxyUrl, config path/error, `cspAllowsApi`, sidecar `ready` info. |
+| `app_info()` | version, log dir, env, apiBaseUrl, proxyUrl, bootstrap error, `cspAllowsApi`, sidecar `ready` info. |
 | `driver_import({params:{name, className, urlTemplate, defaultPort?, version?}})` | Custom JDBC driver (`driver:"custom"`). Rust opens a **native multi-select .jar dialog** (paths never come from the WebView), validates (1-20 files, regular non-symlink `.jar`, <= 200 MB each; `className` = Java identifier path; `urlTemplate` starts with `jdbc:` and only uses `{host}` `{port}` `{database}`), copies the JARs to `<app_data_dir>/drivers-custom/<id>__<name>.jar` (`id` = slug + 8 hex), computes SHA-256, updates `manifest.json` atomically under a mutex, then calls the sidecar's internal `drivers.reload`. Returns `{id, name, files:[{file,sha256}], loaded, error?}` (a driver that fails to load is kept so the UI can show the error and offer removal). Cancelled dialog -> `E_CANCELLED`. |
 | `driver_list()` -> `{drivers:[…]}` | `type:"custom"` entries from the sidecar's `hello` (`id,name,version,className,urlTemplate,defaultPort,files,loaded,error?`). |
 | `driver_remove(id)` | Removes the manifest entry + its files, reloads the sidecar. `E_NOT_FOUND` if unknown. |
@@ -38,13 +38,7 @@ navigation of the main window is pinned to the app origin. Desktop API envelopes
 
 ## Configuration
 
-`%APPDATA%\vn.vnpay.tabledb\config.json` and `config.sample.json` contain only:
-
-```json
-{ "env": "prod" }
-```
-
-The native binary embeds the API base URL and public signing key from `src-tauri/deployment.json` at build time (default API: `https://10.23.5.40:8080/c/`). Local files and environment variables cannot override bootstrap addresses, trust or environment. On startup, valid legacy local files are replaced with the minimal config above; malformed or unreadable files produce an explicit error. No config file is needed to reach the server. Moving from `test` to `prod` changes the credential-manager namespace, so users need to sign in again.
+The native binary embeds the API base URL and public signing key from `src-tauri/deployment.json` at build time (default API: `https://10.23.5.40:8080/c/`). Local files and environment variables cannot override bootstrap addresses, trust or environment. Startup always uses the embedded deployment without reading local files. The app does not create, read or write `config.json` or `config.sample.json`. Desktop runs only in `prod` and uses the fixed `vn.vnpay.tabledb.prod` credential-manager namespace.
 
 Rust retrieves desktop settings (SSO proxy/browser/origins, general proxy, Java heap and timeouts) from `/api/v1/desktop/config` through secure transport. Agent endpoints and runtime settings come from `/api/v1/agent/config` after sign-in. These settings remain in memory and are never written to local config.json. Restart the app to pick up server deployment changes. Embedded addresses can still be extracted from a binary; this prevents plaintext local configuration disclosure, not reverse engineering.
 
@@ -55,7 +49,7 @@ Rust retrieves desktop settings (SSO proxy/browser/origins, general proxy, Java 
 Logs: `%LOCALAPPDATA%\vn.vnpay.tabledb\logs\tabledb.log` (5 MB rotation, keep 5), every line passes through `redact.rs`
 (bearer/JWT, `password|token|secret|code_verifier…=` pairs, `code`/`state` URL params, URL userinfo).
 
-If startup shows "Không tải được cấu hình desktop", the error screen includes the actual API URL, local config path, error code and failed stage. `E_DESKTOP_BOOTSTRAP` means local configuration failed before network traffic; IPC permission errors also appear directly. Native logs record `desktop configuration fetch started` and `native secure API sending` with the URL and request ID. Match that ID with the API server's `request_id`. `E_CONFIG_NETWORK` distinguishes connection/build/timeout errors; `handshake_http` shows the HTTP status, and `handshake_signature` points to a mismatch between the trusted desktop public key and the API's desktop signing key. Native API requests do not appear in the WebView Network tab. The native startup migrates valid old config files to the minimal prod config.
+If startup shows "Không tải được cấu hình desktop", the error screen includes the actual API URL, error code and failed stage. `E_DESKTOP_BOOTSTRAP` means the embedded deployment failed before network traffic; IPC permission errors also appear directly. Native logs record `desktop configuration fetch started` and `native secure API sending` with the URL and request ID. Match that ID with the API server's `request_id`. `E_CONFIG_NETWORK` distinguishes connection/build/timeout errors; `handshake_http` shows the HTTP status, and `handshake_signature` points to a mismatch between the trusted desktop public key and the API's desktop signing key. Native API requests do not appear in the WebView Network tab.
 
 ## SSO proxy
 

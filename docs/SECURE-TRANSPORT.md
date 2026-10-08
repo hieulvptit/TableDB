@@ -25,7 +25,7 @@ Client type is not proof of a trusted device. Existing sessions, bearer credenti
 
 Maximum decoded request size follows `max(PART_BYTES, 1 MiB)`, capped at 64 MiB. Read deadlines bound handshake/request admission. Handshake IP limiting uses the server's existing trusted-proxy IP resolver; session/admission limits apply per process.
 
-`.env` contains independent generated private keys for the current deployment and corresponding public pins. It is gitignored and must remain private. `packages/shared/src/secure-pins.ts` and desktop `config.sample.json` contain only public trust anchors. Never publish either private signing key as a `VITE_*` variable or put private keys into desktop files. AES session keys are unrelated to the static signing keys.
+`.env` contains independent generated private keys for the current deployment and corresponding public pins. It is gitignored and must remain private. `packages/shared/src/secure-pins.ts` and desktop `deployment.json` contain only public trust anchors. Never publish either private signing key as a `VITE_*` variable or put private keys into desktop files. AES session keys are unrelated to the static signing keys.
 
 Generate each signing identity independently, with private output redirected to a restricted temporary file:
 

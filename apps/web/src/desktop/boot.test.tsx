@@ -12,16 +12,15 @@ vi.mock('./DesktopApp', () => ({ default: () => <div>Desktop ready</div> }));
 
 beforeEach(() => vi.resetAllMocks());
 
-it('shows a local configuration error before attempting any server request', async () => {
+it('shows an embedded deployment error before attempting any server request', async () => {
   vi.mocked(desktopCommands.appInfo).mockResolvedValue({
     configError: 'endpoint must use https (http allowed only for loopback)',
-    configPath: 'C:\\Users\\test\\AppData\\Roaming\\vn.vnpay.tabledb\\config.json',
   });
   const { App } = await start();
   render(<App />);
   expect(screen.getByRole('alert')).toHaveTextContent('E_DESKTOP_BOOTSTRAP');
   expect(screen.getByRole('alert')).toHaveTextContent('endpoint must use https');
-  expect(screen.getByText(/File cấu hình:/)).toHaveTextContent('config.json');
+  expect(screen.queryByText(/File cấu hình:/)).not.toBeInTheDocument();
   expect(desktopCommands.desktopConfig).not.toHaveBeenCalled();
 });
 
