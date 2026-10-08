@@ -30,7 +30,14 @@ func TestAgentRuntimeOverrides(t *testing.T) {
 	}
 }
 func TestDesktopConfiguration(t *testing.T) {
-	c, err := Load(map[string]string{"DESKTOP_CONFIG": `{"genaiProxyUrl":null,"genaiLoginBrowser":"internal","genaiInternalConnectPort":47614,"sidecar":{"maxHeapMb":1024}}`})
+	c, err := Load(map[string]string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Desktop.GenaiLoginBrowser != "internal" || c.Desktop.GenaiProxyURL == nil || *c.Desktop.GenaiProxyURL != "http://10.23.5.189:3359" {
+		t.Fatalf("desktop SSO defaults: config=%+v, error=%v", c.Desktop, err)
+	}
+	c, err = Load(map[string]string{"DESKTOP_CONFIG": `{"genaiProxyUrl":null,"genaiLoginBrowser":"internal","genaiInternalConnectPort":47614,"sidecar":{"maxHeapMb":1024}}`})
 	if err != nil || c.Desktop.GenaiProxyURL != nil || c.Desktop.Sidecar.MaxHeapMb != 1024 || c.Desktop.GenaiInternalConnectPort != 47614 {
 		t.Fatalf("desktop override: %v", err)
 	}

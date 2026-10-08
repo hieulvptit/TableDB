@@ -11,7 +11,7 @@ Rust core + WebView hosting the React SPA (`apps/web`, build output `apps/web/di
 | `sidecar_cancel(queryId)` | `query.cancel`. |
 | `secret_set/get/delete(key[,value])` | OS credential store via `keyring`, service `vn.vnpay.tabledb.<env>`. **macOS/Linux:** all keys live in ONE item (`vault.v1`, a JSON map) that is read once per process and cached in memory, so the Keychain asks at most once per launch (none after "Always Allow"); on macOS a write deletes + re-adds the item instead of read-then-modify (no prompt, and the new item trusts the current binary); a write happens only when a value changes, deleting a missing key touches nothing. Items from older versions (`auth.session`, `db.profile.*.password`) are not migrated: sign in / re-save the password once. **Windows:** one Credential Manager item per key (no prompts there, but a ~2.5 KB item limit), value max 1200 chars. Keys `[A-Za-z0-9._:/@-]{1,128}`. `get` returns `null` if absent; `delete` is idempotent. Values/keys are never logged. |
 | `oidc_begin({authorizeEndpoint, clientId, scope?, extraParams?, timeoutSec?})` | RFC 8252 loopback + PKCE (S256). Binds `127.0.0.1:<random>`, opens the **system browser**, validates `state`, returns `{code, redirectUri, codeVerifier}`. The SPA then calls `POST /auth/desktop/exchange` on the API. Endpoint/client id come from the API's `/auth/desktop/config` (nothing hard-coded); https required (http only for loopback dev). Listener is single-use, default timeout 300 s (30–600), one flow at a time. |
-| `genai_login_begin({params:{loginUrl, timeoutSec?}})` -> `{token}` | VNPAY SSO broker login. **Browser mode** (`genaiLoginBrowser`, default `internal`): `internal` opens an in-app webview window (label `genai-login`, 480x720, incognito, own data dir) on `<loginUrl>?connectid=1`, so the login traffic uses `proxy.url` (`http://`/`socks5://` only, else `E_PROXY_UNSUPPORTED`; macOS needs 14+ for webview proxies). No listener: the broker's redirect to `http://localhost:1/sso-callback?token=…` is intercepted in `on_navigation` and cancelled. Only https navigations are allowed; popups, downloads and every other scheme are blocked; the window has **no IPC** (it is not in any capability, which lists only `main`). Closing the window -> `E_GENAI_CANCELLED`, timeout -> `E_GENAI_TIMEOUT`. `system` is the loopback-listener mode described below and is the fallback where the embedded browser is refused (Google accounts return `disallowed_useragent` in embedded webviews). The rest of this row describes `system` mode:  (`https://genai.vnpay.vn/create-jwt-token?connectid=…`, `oidc_begin` stays as fallback). `loginUrl` must be https with an origin in `genaiLoginOrigins` (default only `https://genai.vnpay.vn`). Binds `127.0.0.1` **and** `::1` on one port (the broker redirects to `http://localhost:<connectid>/sso-callback?token=…`). **Default protocol (as the antisw reference apps)**: `connectid=<port>`, only `GET /sso-callback?token=<JWT>` is accepted. Opt-in `genaiSecretPath` (config / `TABLEDB_GENAI_SECRET_PATH=1`; enable only after genai validates connectid with a regex that allows this form): `connectid=<port>/cb/<S>` with `S` = 32 random bytes (base64url) and only `GET /cb/<S>/sso-callback` (constant-time compare) for login-CSRF protection. In both modes: Host must be `localhost|127.0.0.1|[::1]:<port>`, exactly one valid callback is accepted, anything else gets 404 and the listener keeps waiting. 8 KiB / 5 s request limits, token URL-decoded, ≤ 4 KiB, must look like a JWT (not verified here, the API verifies HS256). Default timeout 180 s (5–600). Shares the busy flag with `oidc_begin` (`E_GENAI_BUSY`). Errors: `E_GENAI_ORIGIN/LISTEN/TIMEOUT/CANCELLED/NO_TOKEN/BAD_TOKEN`. Token and `S` are never logged (`redact.rs` strips `/cb/<S>` (secret mode), `connectid=`, `token=`). |
+| `genai_login_begin({params:{loginUrl, timeoutSec?}})` -> `{token}` | VNPAY SSO broker login. **Browser mode** (`genaiLoginBrowser`, default `internal`): `internal` opens an in-app webview window (label `genai-login`, 480x720, own SSO profile) on `<loginUrl>?connectid=<genaiInternalConnectPort>` (default `47613`), so the login traffic uses the SSO CONNECT bridge when `genaiProxyUrl` is configured, otherwise `proxy.url` (`http://`/`socks5://` only, else `E_PROXY_UNSUPPORTED`; macOS needs 14+ for webview proxies). No listener: the broker's redirect to `http://localhost:<genaiInternalConnectPort>/sso-callback?token=…` is intercepted in `on_navigation` and cancelled. Only https navigations are allowed; popups, downloads and every other scheme are blocked; the window has **no IPC** (it is not in any capability, which lists only `main`). Closing the window -> `E_GENAI_CANCELLED`, timeout -> `E_GENAI_TIMEOUT`. `system` is the loopback-listener mode described below and is the fallback where the embedded browser is refused (Google accounts return `disallowed_useragent` in embedded webviews). The rest of this row describes `system` mode:  (`https://genai.vnpay.vn/create-jwt-token?connectid=…`, `oidc_begin` stays as fallback). `loginUrl` must be https with an origin in `genaiLoginOrigins` (default only `https://genai.vnpay.vn`). Binds `127.0.0.1` **and** `::1` on one port (the broker redirects to `http://localhost:<connectid>/sso-callback?token=…`). **Default protocol (as the antisw reference apps)**: `connectid=<port>`, only `GET /sso-callback?token=<JWT>` is accepted. Opt-in `genaiSecretPath` (config / `TABLEDB_GENAI_SECRET_PATH=1`; enable only after genai validates connectid with a regex that allows this form): `connectid=<port>/cb/<S>` with `S` = 32 random bytes (base64url) and only `GET /cb/<S>/sso-callback` (constant-time compare) for login-CSRF protection. In both modes: Host must be `localhost|127.0.0.1|[::1]:<port>`, exactly one valid callback is accepted, anything else gets 404 and the listener keeps waiting. 8 KiB / 5 s request limits, token URL-decoded, ≤ 4 KiB, must look like a JWT (not verified here, the API verifies HS256). Default timeout 300 s (5–600). Shares the busy flag with `oidc_begin` (`E_GENAI_BUSY`). Errors: `E_GENAI_ORIGIN/LISTEN/TIMEOUT/CANCELLED/NO_TOKEN/BAD_TOKEN`. Token and `S` are never logged (`redact.rs` strips `/cb/<S>` (secret mode), `connectid=`, `token=`). |
 | `genai_login_forget()` | Deletes the persisted SSO profile of the login window so the next login asks for credentials again. Refused while a login is running (`E_GENAI_BUSY`). Windows/Linux: removes `<app_local_data_dir>/genai-login-webview` (best effort, not-found is fine). macOS: WKWebView ignores `data_directory` and keys its store by identifier (macOS 14+), so the store is cleared through a short-lived hidden window using the same identifier. |
 | `genai_login_cancel()` | Aborts the in-flight `genai_login_begin` (it then fails with `E_GENAI_CANCELLED`) and closes the login window. |
 | `open_external(url)` | http/https only, no credentials/control chars. |
@@ -72,14 +72,20 @@ Manager, macOS Keychain, or Linux Secret Service (an unlocked desktop keyring is
 required on Linux). They override server SSO proxy settings and survive app restarts.
 Existing saved credentials remain supported. Passwords are never returned to the WebView.
 
-The login screen automatically checks the proxy TCP port with a three-second timeout.
-The proxy indicator is an icon: green when reachable, orange while checking, and red
-when unreachable or the check fails. It is hidden when no proxy is configured. Click
+The login screen automatically sends an authenticated CONNECT request to the SSO
+proxy for `genai.vnpay.vn:443`, with a five-second timeout. Credentials come from
+the OS vault or the native build default and are never returned to the WebView.
+The proxy indicator is an icon: green when the proxy accepts the credentials and
+opens the tunnel, orange while checking, and red when the check fails. Its tooltip
+distinguishes missing credentials, rejected authentication (`407`), network failure,
+and a refused tunnel. It is hidden when no proxy is configured. Click
 it to check again; its tooltip includes the result and latency. The status check
 does not disable SSO. The native core checks the proxy before reading credentials:
-if the proxy cannot be reached, login opens a direct connection without requiring
-proxy credentials or falling back to the general API proxy. A successful TCP check does not verify the
-proxy username/password or the remote SSO site.
+if the configured proxy cannot be reached, login reports `E_PROXY_UNREACHABLE`
+before opening a browser. It never silently switches to direct access. Direct SSO
+is available only when explicitly configured without an SSO proxy. A successful
+CONNECT check does not verify the destination's TLS certificate, HTTP response,
+or SSO login. A proxy that does not require authentication can accept any credentials.
 
 The app runs a loopback CONNECT bridge only for the active login session. It sends
 Basic proxy authentication to the upstream proxy, forwards TLS without decrypting
@@ -88,12 +94,16 @@ it, and restricts tunnels to the configured broker hosts, `sso.vnpay.vn`,
 `googleusercontent.com` and their subdomains). The bridge and its tunnels stop on
 success, cancellation, timeout or error.
 
-The deployment sample uses `genaiLoginBrowser: "system"`: a separate Chrome/Edge
-process with an app-specific profile and proxy, so Google login uses a real browser.
-Install Chrome/Edge (or Chromium on Linux). The app closes that login browser when
+The deployment sample uses `genaiLoginBrowser: "internal"`: an in-app login popup
+with a dedicated profile and the session CONNECT bridge as its proxy. The broker's
+localhost callback is intercepted inside the popup; no external browser is opened.
+If an identity provider refuses embedded browsers, explicitly set
+`genaiLoginBrowser: "system"` on the server to use a separate Chrome/Edge process
+with an app-specific profile and proxy. Install Chrome/Edge (or Chromium on Linux)
+for that mode. The app closes that login browser when
 the flow ends; **Forget SSO** also clears its separate profile. Normal browser
-profiles and OS proxy settings are unchanged. `"internal"` also supports the bridge,
-but Google may refuse embedded browsers. See [Google's native-app OAuth guidance](https://developers.google.com/identity/protocols/oauth2/native-app).
+profiles and OS proxy settings are unchanged. Google may refuse embedded browsers.
+See [Google's native-app OAuth guidance](https://developers.google.com/identity/protocols/oauth2/native-app).
 
 ## Building on Windows
 

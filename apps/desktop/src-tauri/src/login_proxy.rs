@@ -104,15 +104,41 @@ pub async fn check_connectivity(raw: Option<&str>) -> Result<ProxyCheck, AppErro
 }
 
 /// Choose the SSO route before reading credentials or starting a bridge.
-/// An unavailable proxy falls back to a direct browser connection.
+/// A configured proxy is required: never silently bypass it with a direct connection.
 pub async fn reachable_login_proxy(raw: Option<&str>) -> Result<Option<&str>, AppError> {
     let check = check_connectivity(raw).await?;
     if check.reachable {
         Ok(raw)
     } else {
-        log::info!("SSO proxy is unavailable; using a direct connection");
-        Ok(None)
+        Err(AppError::new("E_PROXY_UNREACHABLE", "cannot reach the configured SSO proxy").retryable(true))
     }
+}
+
+/// Verify that the proxy accepts the saved credentials and a tunnel to the SSO broker.
+/// Only the CONNECT request carries credentials; no SSO token or page is requested.
+pub async fn check_authentication(raw: &str, credentials: &Credentials) -> Result<u64, AppError> {
+    let proxy = validate_proxy(raw)?;
+    let started = std::time::Instant::now();
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut stream = TcpStream::connect((proxy.host_str().unwrap(), proxy.port_or_known_default().unwrap()))
+            .await.map_err(|_| AppError::new("E_PROXY_UNREACHABLE", "cannot reach SSO proxy"))?;
+        let auth = STANDARD.encode(format!("{}:{}", credentials.username, credentials.password));
+        stream.write_all(format!("CONNECT genai.vnpay.vn:443 HTTP/1.1\r\nHost: genai.vnpay.vn:443\r\nProxy-Authorization: Basic {auth}\r\n\r\n").as_bytes())
+            .await.map_err(|_| AppError::new("E_PROXY_UNREACHABLE", "cannot send proxy check"))?;
+        let response = read_header(&mut stream).await
+            .map_err(|_| AppError::new("E_PROXY_TARGET", "invalid proxy response"))?;
+        let mut status = std::str::from_utf8(&response).ok().and_then(|s| s.lines().next()).unwrap_or("").split_whitespace();
+        if !matches!(status.next(), Some("HTTP/1.0" | "HTTP/1.1")) {
+            return Err(AppError::new("E_PROXY_TARGET", "invalid proxy response"));
+        }
+        match status.next() {
+            Some("200") => Ok(()),
+            Some("407") => Err(AppError::new("E_PROXY_AUTH_FAILED", "proxy rejected credentials")),
+            _ => Err(AppError::new("E_PROXY_TARGET", "proxy refused tunnel to SSO broker")),
+        }
+    }).await.map_err(|_| AppError::new("E_PROXY_UNREACHABLE", "proxy check timed out").retryable(true))?;
+    result?;
+    Ok(started.elapsed().as_millis() as u64)
 }
 
 #[derive(Deserialize)]
@@ -404,6 +430,35 @@ pub fn open_browser(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn authenticated_check_distinguishes_success_auth_and_target_errors() {
+        for (response, expected) in [
+            ("HTTP/1.1 200 Connection Established\r\n\r\n", None),
+            ("HTTP/1.1 407 Proxy Authentication Required\r\n\r\n", Some("E_PROXY_AUTH_FAILED")),
+            ("HTTP/1.1 403 Forbidden\r\n\r\n", Some("E_PROXY_TARGET")),
+            ("HTTP/1.1 502 Bad Gateway\r\n\r\n", Some("E_PROXY_TARGET")),
+            ("garbage 200 OK\r\n\r\n", Some("E_PROXY_TARGET")),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request = String::from_utf8(read_header(&mut stream).await.unwrap()).unwrap();
+                assert!(request.starts_with("CONNECT genai.vnpay.vn:443 HTTP/1.1\r\n"));
+                assert!(request.contains(&format!("Proxy-Authorization: Basic {}\r\n", STANDARD.encode("check-user:check-password"))));
+                stream.write_all(response.as_bytes()).await.unwrap();
+                let mut byte = [0];
+                assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
+            });
+            let credentials = Credentials::parse(r#"{"username":"check-user","password":"check-password"}"#).unwrap();
+            let result = check_authentication(&url, &credentials).await;
+            assert_eq!(result.err().map(|e| e.code), expected.map(str::to_string));
+            server.await.unwrap();
+            // A closed TCP port remains a network error, not an authentication error.
+            assert_eq!(check_authentication(&url, &credentials).await.unwrap_err().code, "E_PROXY_UNREACHABLE");
+        }
+    }
+
     #[test]
     fn default_credentials_are_scoped_to_default_proxy() {
         let c = login_credentials(None, DEFAULT_PROXY_URL, "test-build-password").unwrap();
@@ -451,12 +506,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn login_route_falls_back_to_direct_when_proxy_is_closed() {
+    async fn login_route_requires_configured_proxy_and_allows_explicit_direct() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         assert_eq!(reachable_login_proxy(Some(&url)).await.unwrap(), Some(url.as_str()));
         drop(listener);
-        assert_eq!(reachable_login_proxy(Some(&url)).await.unwrap(), None);
+        let error = reachable_login_proxy(Some(&url)).await.unwrap_err();
+        assert_eq!(error.code, "E_PROXY_UNREACHABLE");
+        assert!(error.retryable);
         assert_eq!(reachable_login_proxy(None).await.unwrap(), None);
     }
 

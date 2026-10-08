@@ -8,6 +8,20 @@ afterEach(() => {
   delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
 });
 
+it.each([
+  ['E_PROXY_AUTH_FAILED', 'authFailed'],
+  ['E_PROXY_AUTH_REQUIRED', 'required'],
+  ['E_PROXY_TARGET', 'targetFailed'],
+] as const)('shows a red icon with the specific reason for %s', async (errorCode, status) => {
+  (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {
+    invoke: vi.fn(async () => ({ proxyUrl: 'http://proxy.test:3359', reachable: false, latencyMs: null, errorCode })),
+  };
+  render(<ToastProvider><GenaiLoginPanel loginUrl="https://genai.vnpay.vn/create-jwt-token" onDone={() => {}} /></ToastProvider>);
+  const icon = await screen.findByRole('button', { name: `${t('login.proxy.retry')}: ${t(`login.proxy.${status}`)}` });
+  expect(icon.style.color).toBe('var(--ui-danger)');
+  expect(icon).toHaveAttribute('title', `${t('login.proxy.label')}: ${t(`login.proxy.${status}`)}`);
+});
+
 it.each(['direct', 'proxy'] as const)('hides the proxy status when none is configured, regardless of API mode (%s)', async connectionMode => {
   (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = { invoke: vi.fn(async () => ({ proxyUrl: null, reachable: true, latencyMs: null })) };
   render(<ToastProvider><GenaiLoginPanel loginUrl="https://genai.vnpay.vn/create-jwt-token" onDone={() => {}}
@@ -90,7 +104,8 @@ it('lets users save a custom proxy URL and credentials', async () => {
   await screen.findByRole('button', { name: `${t('login.proxy.retry')}: ${t('login.proxy.reachable')}` });
   expect(screen.queryByLabelText(t('login.proxy.url'))).toBeNull();
   fireEvent.click(screen.getByText(t('login.proxy.title')));
-  expect(screen.getByLabelText(t('login.proxy.username'))).toHaveValue('de_team');
+  expect(screen.getByLabelText(t('login.proxy.url'))).toHaveValue('');
+  expect(screen.getByLabelText(t('login.proxy.username'))).toHaveValue('');
   fireEvent.change(screen.getByLabelText(t('login.proxy.url')), { target: { value: 'http://custom-proxy:3128' } });
   fireEvent.change(screen.getByLabelText(t('login.proxy.username')), { target: { value: 'custom-user' } });
   expect(screen.getByRole('button', { name: t('login.proxy.save') })).toBeDisabled();

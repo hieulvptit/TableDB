@@ -200,9 +200,15 @@ pub async fn genai_proxy_check(state: State<'_, AppState>) -> Result<Value, AppE
     let saved = saved_sso_proxy(&state).await?;
     let url = saved.as_ref().map(|s| s.effective_url(deployment.config.genai_proxy_url.as_deref()))
         .unwrap_or_else(|| deployment.config.genai_proxy_url.clone());
-    let check = crate::login_proxy::check_connectivity(url.as_deref()).await?;
+    let result = if let Some(upstream) = url.as_deref() {
+        match crate::login_proxy::login_credentials(saved.as_ref(), upstream, crate::login_proxy::default_proxy_password()) {
+            Ok(credentials) => crate::login_proxy::check_authentication(upstream, &credentials).await.map(Some),
+            Err(error) => Err(error),
+        }
+    } else { Ok(None) };
     let username = saved.as_ref().map(|s| s.username.as_str()).unwrap_or(crate::login_proxy::DEFAULT_PROXY_USERNAME);
-    Ok(json!({"proxyUrl": check.proxy_url, "username": username, "reachable": check.reachable, "latencyMs": check.latency_ms}))
+    let error_code = result.as_ref().err().map(|e| e.code.as_str());
+    Ok(json!({"proxyUrl": url, "username": username, "reachable": result.is_ok(), "latencyMs": result.as_ref().ok().copied().flatten(), "errorCode": error_code}))
 }
 
 /// VNPAY SSO broker login (loopback listener + secret callback path). Shares the busy flag with `oidc_begin`.
@@ -230,8 +236,8 @@ pub async fn genai_login_begin(app: AppHandle, state: State<'_, AppState>, mut p
                 crate::login_proxy::validate_proxy(upstream)?, Some(credentials), &config.genai_login_origins,
             ).await?)
         } else { None };
-        // A configured but unreachable SSO proxy must fall back to direct access,
-        // rather than accidentally reusing the general API proxy.
+        // Explicit SSO routing overrides the general API proxy. A configured SSO
+        // proxy must be reachable above before any login window can open.
         let browser_proxy = if proxy_url.is_some() || saved.is_some() {
             proxy_bridge.as_ref().map(|p| p.url.as_str())
         } else {

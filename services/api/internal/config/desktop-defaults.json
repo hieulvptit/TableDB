@@ -10,7 +10,7 @@
   ],
   "genaiSecretPath": false,
   "genaiPersistSso": true,
-  "genaiLoginBrowser": "system",
+  "genaiLoginBrowser": "internal",
   "genaiProxyUrl": "http://10.23.5.189:3359",
   "genaiTimeoutSec": 300,
   "genaiInternalConnectPort": 47613,

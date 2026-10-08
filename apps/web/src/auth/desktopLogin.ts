@@ -55,6 +55,8 @@ export function genaiErrorMessage(e: unknown): string {
     return t('login.genai.err.detail', { msg: base, status: e.status, code: e.code }) + (e.message && !/^HTTP \d+$/.test(e.message) ? `: ${scrub(e.message)}` : '');
   }
   switch ((e as TauriErr | null)?.code) {
+    case 'E_PROXY_AUTH_FAILED': return t('login.proxy.authFailed');
+    case 'E_PROXY_TARGET': return t('login.proxy.targetFailed');
     case 'E_PROXY_AUTH_REQUIRED': return t('login.proxy.required');
     case 'E_PROXY_UNREACHABLE': return t('login.proxy.unreachable');
     case 'E_GENAI_TIMEOUT': return t('login.genai.err.timeout');
