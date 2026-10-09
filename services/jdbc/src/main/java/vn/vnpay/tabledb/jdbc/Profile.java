@@ -121,7 +121,7 @@ public final class Profile {
         }
 
         opt.only(OPTION_KEYS);
-        ssl = opt.bool("ssl", false);
+        ssl = opt.bool("ssl", false) || (driver.equals("trino") && authType.equals("trino-external"));
         readOnly = opt.bool("readOnly", true);
         allowWrite = opt.bool("allowWrite", false);
         connectTimeoutSec = opt.intIn("connectTimeoutSec", 15, 1, 120);

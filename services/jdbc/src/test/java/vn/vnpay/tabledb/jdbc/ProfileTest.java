@@ -39,6 +39,21 @@ class ProfileTest {
         assertEquals(15, p.connectTimeoutSec);
     }
 
+    @Test void trinoExternalAlwaysUsesTlsIncludingThroughTunnel() {
+        Map<String, Object> input = pg();
+        input.put("driver", "trino");
+        input.put("auth", Map.of("type", "trino-external"));
+        opts(input).put("ssl", false);
+        opts(input).put("props", Map.of("SSL", "false"));
+        Profile profile = parse(input);
+        assertTrue(profile.ssl);
+        TrinoVendor vendor = new TrinoVendor(new EventBus());
+        assertEquals("true", vendor.allProps(profile).getProperty("SSL"));
+        Profile routed = profile.routedTo("127.0.0.1", 12345);
+        assertEquals("true", vendor.allProps(routed).getProperty("SSL"));
+        assertEquals("db.internal", vendor.allProps(routed).getProperty("hostnameInCertificate"));
+    }
+
     @Test void unknownOptionKeysRejected() {
         for (String k : new String[] {"sslmode", "url", "jdbcUrl", "driverPath", "properties", "socketFactory", "loggerLevel"}) {
             Map<String, Object> p = pg();

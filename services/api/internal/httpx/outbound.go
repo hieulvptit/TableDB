@@ -30,6 +30,19 @@ func NewOutbound(proxies map[string]string) *Outbound {
 	return &Outbound{proxies: proxies, clients: map[Hop]*http.Client{}}
 }
 
+// RouteInfo describes the configured route without exposing proxy credentials.
+func (o *Outbound) RouteInfo(h Hop) (route, proxy string, auth bool) {
+	raw := o.proxies[string(h)]
+	if raw == "" {
+		return "direct", "", false
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "proxy", "invalid_proxy_url", false
+	}
+	return "proxy", u.Scheme + "://" + u.Host, u.User != nil
+}
+
 func (o *Outbound) client(h Hop) (*http.Client, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()

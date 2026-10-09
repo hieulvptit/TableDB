@@ -142,6 +142,8 @@ export function NetworkSettings({ value, onChange, touched }: { value: NetworkFo
         <Checkbox label={t('net.useProxy')} checked={value.useProxy} onChange={(e) => set({ useProxy: e.target.checked })} />
         {value.useProxy && (
           <div className="ui-col" style={{ gap: 8, paddingLeft: 16 }}>
+            <Checkbox label={t('net.useDefaultProxy')} checked={value.proxy.useDefault === true} onChange={(e) => set({ proxy: { ...value.proxy, useDefault: e.target.checked } })} />
+            {value.proxy.useDefault ? <div className="ui-muted">HTTP 10.23.5.189:3359 · de_team</div> : <>
             <div className="ui-row" style={{ flexWrap: 'wrap', gap: 8 }}>
               <Select label={t('net.proxyType')} value={value.proxy.type}
                 onChange={(e) => { const type = e.target.value as ProxyType; set({ proxy: { ...value.proxy, type, port: value.proxy.port === DEFAULT_PROXY_PORT[value.proxy.type] ? DEFAULT_PROXY_PORT[type] : value.proxy.port } }); }}
@@ -153,6 +155,7 @@ export function NetworkSettings({ value, onChange, touched }: { value: NetworkFo
               <Input label={t('net.proxyUser')} value={value.proxy.username} onChange={(e) => set({ proxy: { ...value.proxy, username: e.target.value } })} error={err('proxy.username')} autoComplete="off" />
               <Input label={t('net.proxyPassword')} type="password" value={value.proxy.password} onChange={(e) => set({ proxy: { ...value.proxy, password: e.target.value } })} autoComplete="off" />
             </div>
+            </>}
           </div>
         )}
 

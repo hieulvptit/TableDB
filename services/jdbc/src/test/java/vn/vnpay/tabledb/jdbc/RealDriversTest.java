@@ -167,9 +167,23 @@ class RealDriversTest {
         @Override public void close() { server.stop(0); }
     }
 
+    @Test void trinoSsoConnectsWithTlsThroughAuthenticatedHttpProxy() throws Exception {
+        try (FakeCoordinator fc = new FakeCoordinator(tmp);
+             TestProxies.Proxy proxy = new TestProxies.Proxy(false, "de_team", "test-proxy-password")) {
+            Map<String, Object> opts = new LinkedHashMap<>(Map.of("ssl", false, "externalAuthTimeoutSec", 30L));
+            opts.put("proxy", Map.of("type", "http", "host", "127.0.0.1", "port", (long) proxy.port(), "username", "de_team", "password", "test-proxy-password"));
+            Map<String, Object> result = ok(rpc("session.open", "profile", profile("trino", fc.port(), new LinkedHashMap<>(Map.of("type", "trino-external")), opts)));
+            assertNotNull(result.get("sessionId"));
+            assertTrue(proxy.connects.get() > 0);
+            assertEquals("127.0.0.1:" + fc.port(), proxy.lastTarget);
+            assertTrue(fc.tokenPolls.get() > 0);
+        }
+    }
+
     @Test void trinoSsoEmitsAuthOpenUrlEventAndCompletesOpen() throws Exception {
         try (FakeCoordinator fc = new FakeCoordinator(tmp)) {
-            Map<String, Object> opts = new LinkedHashMap<>(Map.of("ssl", true, "externalAuthTimeoutSec", 30L));
+            // Legacy profiles can store ssl=false; SSO must still use HTTPS.
+            Map<String, Object> opts = new LinkedHashMap<>(Map.of("ssl", false, "externalAuthTimeoutSec", 30L));
             Map<String, Object> r = rpc("session.open", "profile", profile("trino", fc.port(), new LinkedHashMap<>(Map.of("type", "trino-external")), opts));
             Map<String, Object> res = ok(r);
             String sid = (String) res.get("sessionId");

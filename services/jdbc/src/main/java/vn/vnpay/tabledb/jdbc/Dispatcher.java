@@ -225,13 +225,18 @@ public final class Dispatcher implements AutoCloseable {
         Session.CURRENT.set(sid);
         Connection c = null;
         Tunnel tunnel = null;
+        String stage = "route";
+        ConnectDiagnostics.event("db.connect request", prof, sid, stage, t0);
         try {
             Profile eff = prof;
             if (Tunnel.needed(prof)) {
                 tunnel = Tunnel.open(prof, sshKeys);
                 eff = prof.routedTo(tunnel.host, tunnel.port);
             }
+            stage = "jdbc_connect";
+            ConnectDiagnostics.event("db.connect dialing", eff, sid, stage, t0);
             c = v.connect(shim, eff);
+            stage = "session_setup";
             c.setAutoCommit(true);
             v.afterConnect(c, eff);
             try {
@@ -245,14 +250,18 @@ public final class Dispatcher implements AutoCloseable {
             try { ver = md.getDatabaseProductVersion(); } catch (SQLException | RuntimeException e) { Log.warn("server version unavailable: " + e.getClass().getSimpleName()); }
             try { user = md.getUserName(); } catch (SQLException | RuntimeException e) { Log.warn("user name unavailable: " + e.getClass().getSimpleName()); }
             if (ver != null && ver.indexOf('\n') > 0) ver = ver.substring(0, ver.indexOf('\n'));
+            ConnectDiagnostics.event("db.connect success", eff, sid, "ready", t0);
             return new Session(sid, eff, v, c, ver, user != null ? user : prof.username, tunnel);
         } catch (SQLException e) {
+            ConnectDiagnostics.failure(prof, sid, stage, t0, e, tunnel);
             closeQuietly(c);
             throw closeTunnel(tunnel, mapConnectError(e, prof, t0));
         } catch (RpcError e) {
+            ConnectDiagnostics.failure(prof, sid, stage, t0, e, tunnel);
             closeQuietly(c);
             throw closeTunnel(tunnel, e);
         } catch (RuntimeException e) {
+            ConnectDiagnostics.failure(prof, sid, stage, t0, e, tunnel);
             closeQuietly(c);
             throw closeTunnel(tunnel, mapConnectError(new SQLException(String.valueOf(e.getMessage())), prof, t0));
         } finally {

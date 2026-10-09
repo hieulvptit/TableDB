@@ -71,7 +71,9 @@ jobs:
       - name: Build desktop frontend
         run: |
           npm ci
+          npm run test --workspace @vnpay/web -- src/features/tabledb/custom.test.ts src/features/tabledb/CustomConnect.test.tsx src/features/tabledb/network.test.ts
           npm run build:desktop --workspace @vnpay/web
+          python3 .github/scripts/desktop-ci.py frontend-manifest
       - name: Build and test JDBC sidecar
         run: mvn -B -ntp -f services/jdbc/pom.xml package
       - name: Download and verify pinned JDBC drivers

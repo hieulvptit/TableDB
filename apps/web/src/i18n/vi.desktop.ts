@@ -371,6 +371,7 @@ export const viDesktop = {
   'net.title': 'Kết nối nâng cao: SSH tunnel / Proxy',
   'net.direct': 'Kết nối trực tiếp',
   'net.hint': 'Dùng khi máy bạn không tới thẳng được CSDL: đi qua proxy HTTP/SOCKS5 và/hoặc một chuỗi máy chủ SSH (bastion/jump). Khi dùng cả hai, proxy chỉ dùng để tới máy SSH đầu tiên.',
+  'net.useDefaultProxy': 'Sử dụng proxy mặc định (de_team)',
   'net.useProxy': 'Qua proxy',
   'net.proxyType': 'Loại proxy',
   'net.proxyHost': 'Máy chủ proxy',

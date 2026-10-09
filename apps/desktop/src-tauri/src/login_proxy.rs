@@ -24,6 +24,23 @@ pub fn default_proxy_password() -> &'static str {
     option_env!("TABLEDB_SSO_PROXY_PASSWORD").unwrap_or("")
 }
 
+/// Resolve the built-in DB proxy inside the native core; never expose its password to the WebView.
+pub fn database_proxy_params(method: &str, mut params: serde_json::Value, password: &str) -> Result<serde_json::Value, AppError> {
+    if matches!(method, "session.open" | "session.test") {
+        if let Some(proxy) = params.pointer_mut("/profile/options/proxy") {
+            if proxy.get("useDefault").and_then(serde_json::Value::as_bool) == Some(true) {
+                if password.is_empty() {
+                    return Err(AppError::new("E_PROXY_AUTH_REQUIRED", "Default database proxy password is missing from this desktop build"));
+                }
+                *proxy = serde_json::json!({"type":"http","host":"10.23.5.189","port":3359,"username":DEFAULT_PROXY_USERNAME,"password":password});
+            } else if let Some(object) = proxy.as_object_mut() {
+                object.remove("useDefault");
+            }
+        }
+    }
+    Ok(params)
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SavedProxy {
@@ -452,6 +469,19 @@ pub fn open_browser(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn database_default_proxy_is_resolved_only_in_native_session_requests() {
+        let params = serde_json::json!({"profile":{"options":{"proxy":{"useDefault":true,"host":"other-host","password":"webview-password"}}}});
+        for method in ["session.open", "session.test"] {
+            let resolved = database_proxy_params(method, params.clone(), "native-password").unwrap();
+            assert_eq!(resolved.pointer("/profile/options/proxy/host").unwrap(), "10.23.5.189");
+            assert_eq!(resolved.pointer("/profile/options/proxy/username").unwrap(), "de_team");
+            assert_eq!(resolved.pointer("/profile/options/proxy/password").unwrap(), "native-password");
+            assert!(resolved.pointer("/profile/options/proxy/useDefault").is_none());
+            assert_eq!(database_proxy_params(method, params.clone(), "").unwrap_err().code, "E_PROXY_AUTH_REQUIRED");
+        }
+        assert_eq!(database_proxy_params("query.execute", params.clone(), "native-password").unwrap(), params);
+    }
     use super::*;
 
     #[test]

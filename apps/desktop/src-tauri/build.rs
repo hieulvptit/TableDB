@@ -1,6 +1,8 @@
 // Every app command needs an explicit permission (allow-<command>) in a capability file.
 // This keeps the invoke surface least-privilege: adding a command without granting it is a no-op.
 fn main() {
+    // Embedded assets must invalidate the crate when restored Rust caches are used.
+    println!("cargo:rerun-if-changed=../../web/dist");
     tauri_build::try_build(
         tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(&[
             "sidecar_request",

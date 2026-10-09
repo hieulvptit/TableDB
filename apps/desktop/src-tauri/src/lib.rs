@@ -138,7 +138,7 @@ pub fn run() {
 
             // ---- main window, created in code so we can pin navigation to the app origin ----
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-                .title("VNPAY TableDB")
+                .title(format!("VNPAY TableDB {}", app.package_info().version))
                 .inner_size(1360.0, 860.0)
                 .min_inner_size(1024.0, 640.0)
                 .on_navigation(navigation_allowed)
