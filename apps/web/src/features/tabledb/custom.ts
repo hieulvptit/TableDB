@@ -47,7 +47,7 @@ export interface CustomForm {
 }
 
 export const emptyCustomForm = (): CustomForm => ({
-  driver: 'oracle', host: '', port: String(DEFAULT_PORTS.oracle), connectType: 'serviceName', database: '', ssl: false,
+  driver: 'trino', host: '', port: String(DEFAULT_PORTS.trino), connectType: 'serviceName', database: '', ssl: false,
   connectTimeoutSec: String(dbRuntimeConfig().connectTimeoutSec), props: [], allowWrite: false, username: '', password: '', schema: '', sso: false,
 });
 
@@ -179,7 +179,7 @@ export function buildCustomRequest(f: CustomForm, canWrite: boolean): SessionReq
     host: f.host.trim(), port: Number(f.port), ...(database ? { database } : {}),
     options: {
       ...(f.driver === 'oracle' ? { connectType: f.connectType } : {}),
-      ssl: f.ssl, readOnly: true, allowWrite: canWrite && f.allowWrite,
+      ssl: f.ssl || usesSso(f), readOnly: true, allowWrite: canWrite && f.allowWrite,
       connectTimeoutSec: Number(f.connectTimeoutSec),
       ...(usesSso(f) ? { externalAuthTimeoutSec: dbRuntimeConfig().externalAuthTimeoutSec } : {}),
       ...(Object.keys(props).length > 0 ? { props } : {}),

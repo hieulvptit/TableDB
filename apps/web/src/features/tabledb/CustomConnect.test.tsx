@@ -20,6 +20,7 @@ let audits: Array<Record<string, unknown>>;
 beforeEach(() => {
   sidecar = []; audits = [];
   (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {
+    transformCallback: () => 1,
     invoke: async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === 'driver_list') return { drivers: [{ id: 'mysql8', name: 'MySQL 8', className: 'com.mysql.cj.jdbc.Driver', urlTemplate: 'jdbc:mysql://{host}:{port}/{database}', defaultPort: 3306, files: [{ file: 'a.jar', sha256: 'x' }], loaded: true }] };
       if (cmd !== 'sidecar_request') return null;
@@ -44,12 +45,30 @@ afterEach(() => { vi.restoreAllMocks(); delete (window as unknown as Record<stri
 const page = (a: AuthState) => render(<AuthContext.Provider value={a}><ToastProvider><MemoryRouter><TableDbPage /></MemoryRouter></ToastProvider></AuthContext.Provider>);
 
 describe('custom connection mode', () => {
+  it('enables TLS for Trino SSO and connects through the built-in proxy marker', async () => {
+    const user = userEvent.setup();
+    localStorage.clear();
+    page(auth(perms));
+    expect(await screen.findByLabelText('Loại cơ sở dữ liệu / driver')).toHaveValue('trino');
+    await user.type(await screen.findByLabelText('Máy chủ (IP hoặc hostname)'), 'trino.internal');
+    await user.click(screen.getByLabelText('Trino SSO'));
+    expect(screen.getByLabelText('Dùng SSL/TLS')).toBeChecked();
+    expect(screen.getByLabelText('Dùng SSL/TLS')).toBeDisabled();
+    await user.click(screen.getByLabelText('Qua proxy'));
+    await user.click(screen.getByLabelText('Sử dụng proxy mặc định (de_team)'));
+    expect(screen.queryByLabelText('Mật khẩu proxy')).toBeNull();
+    await user.click(screen.getAllByRole('button', { name: 'Kết nối' }).at(-1)!);
+    await waitFor(() => expect(sidecar.find(x => x.method === 'session.open')?.params).toMatchObject({
+      profile: { driver: 'trino', auth: { type: 'trino-external' }, options: { ssl: true, proxy: { useDefault: true, type: 'http', host: '10.23.5.189', port: 3359, username: 'de_team' } } },
+    }));
+  });
   it('has no mode tabs and no profile-name field; a successful connect is saved automatically and the menu offers reconnect/rename/export', async () => {
     const user = userEvent.setup();
     localStorage.clear();
     page(auth(perms));
     expect(screen.queryByRole('tab')).toBeNull();
     expect(screen.queryByLabelText('Tên hồ sơ')).toBeNull();
+    await user.selectOptions(await screen.findByLabelText('Loại cơ sở dữ liệu / driver'), 'oracle');
     await user.type(await screen.findByLabelText('Dán nhanh địa chỉ'), 'ora.internal:1521/BISVC');
     await user.type(screen.getByLabelText('Tên đăng nhập'), 'scott');
     await user.type(screen.getByLabelText('Mật khẩu'), 'tiger');
@@ -68,6 +87,7 @@ describe('custom connection mode', () => {
   it('paste -> fields -> session.open with serviceName, read-only, audit carries custom endpoint (no targetId)', async () => {
     const user = userEvent.setup();
     page(auth(perms));
+    await user.selectOptions(await screen.findByLabelText('Loại cơ sở dữ liệu / driver'), 'oracle');
     await user.type((await screen.findByLabelText('Dán nhanh địa chỉ')), 'ora.internal:1521/BISVC');
     expect((await screen.findByLabelText('Máy chủ (IP hoặc hostname)'))).toHaveValue('ora.internal');
     expect(screen.getByLabelText('Cổng')).toHaveValue('1521');

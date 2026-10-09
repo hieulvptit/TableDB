@@ -72,7 +72,8 @@ impl EventSink for TauriSink {
 pub async fn sidecar_request(state: State<'_, AppState>, method: String, params: Option<Value>) -> Result<Value, AppError> {
     state.deployment().await?;
     log::debug!("sidecar_request {method}"); // method only, never params
-    state.sidecar.request(&method, params.unwrap_or(Value::Null)).await
+    let params = crate::login_proxy::database_proxy_params(&method, params.unwrap_or(Value::Null), crate::login_proxy::default_proxy_password())?;
+    state.sidecar.request(&method, params).await
 }
 
 #[tauri::command]

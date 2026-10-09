@@ -12,6 +12,31 @@ beforeAll(async () => {
 afterAll(() => { if (server?.pid) { if (process.platform === 'win32') server.kill(); else process.kill(-server.pid, 'SIGTERM'); } });
 function client(kind: 'web' | 'desktop', direct?: typeof fetch, pin?: string) { return createSecureFetch({ baseUrl: keys.url, clientKind: kind, serverPublicKey: pin ?? keys[kind], cryptoImpl: webcrypto as unknown as Crypto, fetchImpl: direct }); }
 describe('Go server ↔ WebCrypto clients', () => {
+ it.each(['SECURE_SESSION_EXPIRED', 'SECURE_KEY_MISMATCH'])('resets session and retries a rejected request once for %s', async code => {
+  let handshakes = 0; let requests = 0; let dispatched = 0;
+  const ids: string[] = [];
+  const direct: typeof fetch = async (url, init) => {
+   if (String(url).endsWith('/handshake')) handshakes++;
+   if (String(url).endsWith('/request')) {
+    ids.push(new Headers(init?.headers).get('x-tabledb-session')!);
+    if (++requests === 1) return Response.json({ error: { code } }, { status: code === 'SECURE_SESSION_EXPIRED' ? 410 : 400 });
+    dispatched++;
+   }
+   return fetch(url, init);
+  };
+  const f = client('desktop', direct);
+  expect(await (await f(keys.url + '/echo', { method: 'POST', body: 'retry-body' })).text()).toBe('retry-body');
+  expect(handshakes).toBe(2); expect(dispatched).toBe(1); expect(ids[0]).not.toBe(ids[1]);
+ });
+ it('limits session recovery to one retry', async () => {
+  let requests = 0;
+  const direct: typeof fetch = (url, init) => {
+   if (String(url).endsWith('/request')) { requests++; return Promise.resolve(Response.json({ error: { code: 'SECURE_KEY_MISMATCH' } }, { status: 400 })); }
+   return fetch(url, init);
+  };
+  await expect(client('desktop', direct)(keys.url + '/echo', { method: 'POST', body: 'test' })).rejects.toMatchObject({ code: 'SECURE_KEY_MISMATCH' });
+  expect(requests).toBe(2);
+ });
  it('uses canonical encrypted routes behind a /c reverse-proxy mount', async () => {
   const baseUrl = keys.url.replace('/api/v1', '/c/api/v1');
   const endpoints: string[] = [];

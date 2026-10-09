@@ -39,7 +39,7 @@ describe('validateProps', () => {
   });
 });
 
-const form = (o: Partial<CustomForm> = {}): CustomForm => ({ ...emptyCustomForm(), host: 'ora.internal', database: 'BISVC', username: 'scott', password: 'tiger', ...o });
+const form = (o: Partial<CustomForm> = {}): CustomForm => ({ ...emptyCustomForm(), driver: 'oracle', port: '1521', host: 'ora.internal', database: 'BISVC', username: 'scott', password: 'tiger', ...o });
 
 describe('validateCustomForm', () => {
   it('valid oracle form', () => expect(validateCustomForm(form())).toEqual([]));
@@ -106,6 +106,7 @@ describe('Trino SSO (custom)', () => {
     const r = buildCustomRequest(base, false);
     expect(r.auth).toEqual({ type: 'trino-external' });
     expect(r.profile.options?.externalAuthTimeoutSec).toBe(180);
+    expect(buildCustomRequest({ ...base, ssl: false }, false).profile.options?.ssl).toBe(true);
   });
   it('is ignored for other drivers', () => {
     const pg = { ...base, driver: 'postgresql' as const };

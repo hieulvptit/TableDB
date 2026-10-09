@@ -64,6 +64,8 @@ the native app and can be extracted from installers; it is never included in the
 frontend, public API config, source or CI logs. Local builds can supply the same
 build environment variable.
 
+Database connections can explicitly select **Via proxy → Use default proxy (de_team)** to use the same built-in account at `10.23.5.189:3359`. The native core supplies its build-time password directly to the JDBC sidecar; profiles retain only the default-proxy selection. Custom proxy fields remain available when this option is unchecked. Trino SSO automatically enables SSL/TLS in the form and sidecar, including for older saved profiles with SSL disabled.
+
 To use another proxy, expand **SSO login proxy**, enter its URL, username and
 password, and save. Leave the URL empty to select direct SSO. To restore the
 default account, enter the default URL and `de_team`, leaving the password empty.
