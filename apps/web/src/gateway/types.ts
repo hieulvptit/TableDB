@@ -17,7 +17,7 @@ export interface ProfileSpec {
 }
 
 /** HTTP CONNECT / SOCKS5 proxy (username/password optional). */
-export interface ProxySpec { type: 'http' | 'socks'; host: string; port: number; username?: string; password?: string }
+export interface ProxySpec { useDefault?: boolean; type: 'http' | 'socks'; host: string; port: number; username?: string; password?: string }
 export interface SshHopSpec {
   host: string; port: number; username: string;
   auth: { type: 'password'; password: string } | { type: 'publicKey'; keyId: string; passphrase?: string };

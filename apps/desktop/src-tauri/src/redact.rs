@@ -10,6 +10,7 @@ struct Rules {
     userinfo: Regex,
     jwt: Regex,
     cb_path: Regex,
+    url_query: Regex,
 }
 
 fn rules() -> &'static Rules {
@@ -27,6 +28,7 @@ fn rules() -> &'static Rules {
         userinfo: Regex::new(r"(?i)(://)[^/\s:@]+:[^/\s@]+@").unwrap(),
         jwt: Regex::new(r"eyJ[A-Za-z0-9_\-]{5,}\.[A-Za-z0-9_\-]{5,}\.[A-Za-z0-9_\-]*").unwrap(),
         cb_path: Regex::new(r"(?i)/cb(/|%2F)[A-Za-z0-9_\-]{16,}").unwrap(),
+        url_query: Regex::new(r#"(?i)(https?://[^\s?"<>]+)\?[^\s"<>]+"#).unwrap(),
     })
 }
 
@@ -40,6 +42,7 @@ pub fn redact(input: &str) -> String {
     let s = r.userinfo.replace_all(&s, "${1}[REDACTED]@");
     let s = r.url_param.replace_all(&s, "${1}[REDACTED]");
     let s = r.kv.replace_all(&s, "${1}[REDACTED]");
+    let s = r.url_query.replace_all(&s, "${1}?[REDACTED]");
     s.into_owned()
 }
 
@@ -89,5 +92,11 @@ mod tests {
     fn leaves_innocuous_text() {
         let s = "sidecar started pid=42 sqlcode=17 method=query.execute";
         assert_eq!(redact(s), s);
+    }
+
+    #[test]
+    fn redacts_trino_http_log_query_strings() {
+        let o = redact("<-- 302 https://trino.example/oauth2/callback?ticket=private-value&nonce=private-nonce (4ms)");
+        assert_eq!(o, "<-- 302 https://trino.example/oauth2/callback?[REDACTED] (4ms)");
     }
 }

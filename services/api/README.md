@@ -73,6 +73,8 @@ Chuỗi rỗng được coi như chưa đặt. Ở `APP_ENV=prod` cấu hình b�
 | `HRM_BASE_URL`, `HRM_SIGNATURE_SECRET` | – | prod: bắt buộc, https. Danh sách người duyệt = cấp trên từ `GET {HRM_BASE_URL}/hrm/v1/api/managers?email=…` |
 | `DEV_SEED_LEADERS` | – | `"a@vnpay.vn:Tên A,b@vnpay.vn:Tên B"`; chỉ dev, prod ⇒ từ chối khởi động |
 
+**Chẩn đoán đăng nhập GenAI:** xem `<LOG_DIR>/app.log` (mặc định `logs/app.log` cạnh binary). Khi khởi động, `genai.verifier configured` cho biết `mode=local_hs256` dùng `GENAI_JWT_KEY`, hoặc `mode=http_verify` gọi broker qua `GENAI_VERIFY_URL` và không dùng khóa JWT cục bộ. `genai.outbound configured` cho biết đi trực tiếp hay qua proxy trong `OUTBOUND_PROXIES.genai`. Lỗi `genai.verify failed` ghi `stage`, địa chỉ broker, thời gian chờ và `cause` như `dns_error`, `connection refused`, `deadline_exceeded`, `tls_unknown_certificate_authority` hoặc `proxy_authentication_required`. Broker trả 401/403 được ghi riêng dưới `genai.verify rejected`. Mỗi lần xác minh ghi `genai.verify request` với method, URL gồm đường dẫn và query đã che secret, headers, body gửi đi (GET không có body), route và proxy URL; `genai.verify response` ghi URL cuối, HTTP status, content type, server, location và toàn bộ headers (che Authorization/cookie/secret) và body phản hồi tối đa 1 MiB (đã che token và secret). Lỗi kết nối ghi `response_received=false` cùng lỗi transport chi tiết. Các dòng request/response/transport có `request_id` để đối chiếu request API. Không ghi Authorization, khóa JWT hay mật khẩu proxy. Cần triển khai binary mới và khởi động lại API để có các log này.
+
 ## Cấu trúc
 
 ```

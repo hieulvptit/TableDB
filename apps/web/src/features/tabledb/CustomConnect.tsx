@@ -74,6 +74,7 @@ export function CustomConnect({ onConnected, initial }: { onConnected?: () => vo
     if (!p) return;
     set({
       host: p.host, ...(p.port ? { port: String(p.port) } : {}),
+      ...(p.ssl !== undefined ? { ssl: p.ssl || usesSso(f) } : {}),
       ...(p.database ? { database: p.database, ...(p.connectType ? { connectType: p.connectType } : {}) } : {}),
       ...(p.schema ? { schema: p.schema } : {}),
     });
@@ -253,10 +254,14 @@ export function CustomConnect({ onConnected, initial }: { onConnected?: () => vo
       <Input label={dbLabel} value={f.database} onChange={(e) => set({ database: e.target.value })} error={has('database') ? t('custom.err.database') : undefined} autoComplete="off" />
       {f.driver === 'trino' && (
         <label className="ui-row" style={{ gap: 6 }}>
-          <input type="checkbox" checked={f.sso} onChange={(e) => set({ sso: e.target.checked })} />
+          <input type="checkbox" checked={f.sso} onChange={(e) => set({ sso: e.target.checked, ...(e.target.checked ? { ssl: true } : {}) })} />
           {t('connect.authSso')}
         </label>
       )}
+      <label className="ui-row" style={{ gap: 6 }}>
+        <input type="checkbox" checked={f.ssl || usesSso(f)} disabled={usesSso(f)} onChange={(e) => set({ ssl: e.target.checked })} />
+        {t('custom.ssl')}
+      </label>
       {!usesSso(f) && <>
         <Input label={t('connect.username')} value={f.username} onChange={(e) => set({ username: e.target.value })} error={has('username') ? t('custom.err.username') : undefined} autoComplete="off" />
         <Input label={t('connect.password')} type="password" value={f.password} onChange={(e) => set({ password: e.target.value })} autoComplete="off" />

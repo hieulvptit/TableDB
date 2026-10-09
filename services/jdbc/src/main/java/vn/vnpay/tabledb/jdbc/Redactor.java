@@ -14,6 +14,7 @@ public final class Redactor {
     private static final Pattern JWT = Pattern.compile("eyJ[A-Za-z0-9_-]{5,}\\.[A-Za-z0-9_-]{5,}\\.[A-Za-z0-9_-]*");
     private static final Pattern STR_LIT = Pattern.compile("'(?:[^']|'')*'");
     private static final Pattern NUM_LIT = Pattern.compile("\\b\\d+(?:\\.\\d+)?\\b");
+    private static final Pattern URL_QUERY = Pattern.compile("(?i)(https?://[^\\s?\"<>]+)\\?[^\\s\"<>]+");
 
     public static String scrub(String s, String... secrets) {
         if (s == null) return null;
@@ -26,6 +27,7 @@ public final class Redactor {
         r = BEARER.matcher(r).replaceAll("Bearer ***");
         r = JWT.matcher(r).replaceAll("***");
         r = KV.matcher(r).replaceAll("$1=***");
+        r = URL_QUERY.matcher(r).replaceAll("$1?***");
         return r;
     }
 

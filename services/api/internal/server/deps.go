@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -42,6 +43,15 @@ type Overrides struct {
 // BuildDeps assembles the dependency bundle from the config (the equivalent of Ctx in main.ts).
 func BuildDeps(cfg *config.Config, pool *db.Pool, o Overrides) (*app.Deps, error) {
 	out := httpx.NewOutbound(cfg.OutboundProxies)
+	// Log only proxy routing and destination host, never proxy credentials.
+	if raw := cfg.OutboundProxies["genai"]; raw != "" {
+		proxy, err := url.Parse(raw)
+		if err == nil {
+			slog.Info("genai.outbound configured", "route", "proxy", "proxy_host", proxy.Host, "proxy_auth_configured", proxy.User != nil)
+		}
+	} else {
+		slog.Info("genai.outbound configured", "route", "direct")
+	}
 	keys := o.Keys
 	if keys == nil {
 		if cfg.DataKey == "" {

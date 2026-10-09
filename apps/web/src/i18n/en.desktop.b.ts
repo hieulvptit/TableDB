@@ -87,6 +87,8 @@ export const enDesktopB: Partial<Record<keyof typeof viDesktop, string>> = {
   'net.title': 'Advanced connection: SSH tunnel / Proxy',
   'net.direct': 'Direct connection',
   'net.hint': 'Use when your machine cannot reach the database directly: go through an HTTP/SOCKS5 proxy and/or a chain of SSH hosts (bastion/jump). When both are used, the proxy is only used to reach the first SSH host.',
+  'net.useDefaultProxy': 'Use default proxy (de_team)',
+  'net.trinoSplitProxy': 'Trino: *.vnpayapi.vn connects directly; SSO/Google uses the proxy.',
   'net.useProxy': 'Via proxy',
   'net.proxyType': 'Proxy type',
   'net.proxyHost': 'Proxy host',

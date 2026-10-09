@@ -49,6 +49,20 @@ Rust retrieves desktop settings (SSO proxy/browser/origins, general proxy, Java 
 Logs: `%LOCALAPPDATA%\vn.vnpay.tabledb\logs\tabledb.log` (5 MB rotation, keep 5), every line passes through `redact.rs`
 (bearer/JWT, `password|token|secret|code_verifier…=` pairs, `code`/`state` URL params, URL userinfo).
 
+Connection tests and opens log `db.connect request/dialing/success/failed` at INFO/WARN: connection ID, target host/port,
+TLS/auth mode, proxy/SSH route, stage, elapsed time and nested JDBC/network causes. Trino additionally logs BASIC HTTP
+request URLs and response status/timing through sidecar stderr; headers, SQL bodies and rows are omitted. URL query
+parameters are redacted in desktop logs. On the jump machine reproduce with **Test connection** and inspect `tabledb.log`.
+Pasting an `https://` endpoint sets port 443 and enables TLS; an explicit port is preserved. New connections default to Trino.
+Under advanced network settings select **Qua proxy**, then **Sử dụng proxy mặc định (de_team)** to use the built-in proxy.
+
+Trino TLS connections using an HTTP proxy (without an SSH tunnel) share a native CONNECT bridge between JDBC and the SSO
+browser. `vnpayapi.vn` and its subdomains connect directly from the desktop/jump machine. Other SSO destinations, including
+`s2o.vnpay.vn`, Google and related redirect/assets hosts, use the selected upstream proxy. The rule also applies to the
+GenAI login bridge. Proxy credentials are sent only in the upstream CONNECT request; TLS remains end-to-end and the JDBC
+URL retains the real coordinator hostname. Logs record `route=direct/proxy` for each CONNECT destination. Bridges survive
+SSO token refreshes and close after the final owning database session closes; a connection test/failure releases its bridge.
+
 If startup shows "Không tải được cấu hình desktop", the error screen includes the actual API URL, error code and failed stage. `E_DESKTOP_BOOTSTRAP` means the embedded deployment failed before network traffic; IPC permission errors also appear directly. Native logs record `desktop configuration fetch started` and `native secure API sending` with the URL and request ID. Match that ID with the API server's `request_id`. `E_CONFIG_NETWORK` distinguishes connection/build/timeout errors; `handshake_http` shows the HTTP status, and `handshake_signature` points to a mismatch between the trusted desktop public key and the API's desktop signing key. Native API requests do not appear in the WebView Network tab.
 
 ## SSO proxy
@@ -63,6 +77,8 @@ secret `TABLEDB_SSO_PROXY_PASSWORD` before building. The password is compiled in
 the native app and can be extracted from installers; it is never included in the
 frontend, public API config, source or CI logs. Local builds can supply the same
 build environment variable.
+
+Database connections can explicitly select **Via proxy → Use default proxy (de_team)** to use the same built-in account at `10.23.5.189:3359`. The native core supplies its build-time password directly to the JDBC sidecar; profiles retain only the default-proxy selection. Custom proxy fields remain available when this option is unchecked. Trino SSO automatically enables SSL/TLS in the form and sidecar, including for older saved profiles with SSL disabled.
 
 To use another proxy, expand **SSO login proxy**, enter its URL, username and
 password, and save. Leave the URL empty to select direct SSO. To restore the

@@ -39,7 +39,7 @@ describe('validateProps', () => {
   });
 });
 
-const form = (o: Partial<CustomForm> = {}): CustomForm => ({ ...emptyCustomForm(), host: 'ora.internal', database: 'BISVC', username: 'scott', password: 'tiger', ...o });
+const form = (o: Partial<CustomForm> = {}): CustomForm => ({ ...emptyCustomForm(), driver: 'oracle', port: '1521', host: 'ora.internal', database: 'BISVC', username: 'scott', password: 'tiger', ...o });
 
 describe('validateCustomForm', () => {
   it('valid oracle form', () => expect(validateCustomForm(form())).toEqual([]));
@@ -90,6 +90,12 @@ describe('parseEndpoint / formatEndpoint per driver', () => {
     expect(parseEndpoint('t:8080/hive/default', 'trino')).toEqual({ host: 't', port: 8080, database: 'hive', schema: 'default' });
     expect(parseEndpoint('jdbc:trino://t:8080/hive', 'trino')).toEqual({ host: 't', port: 8080, database: 'hive' });
   });
+  it('uses HTTP scheme defaults and keeps explicit ports', () => {
+    expect(parseEndpoint('https://query-engine-staging.vnpayapi.vn', 'trino')).toEqual({ host: 'query-engine-staging.vnpayapi.vn', port: 443, ssl: true });
+    expect(parseEndpoint('https://t:8443/hive/default', 'trino')).toEqual({ host: 't', port: 8443, ssl: true, database: 'hive', schema: 'default' });
+    expect(parseEndpoint('http://t/hive', 'trino')).toEqual({ host: 't', port: 80, ssl: false, database: 'hive' });
+    expect(parseEndpoint('t:8080', 'trino')).toEqual({ host: 't', port: 8080 });
+  });
   it('formats per driver', () => {
     const base = { host: 'h', port: '1521', database: 'X', connectType: 'serviceName' as const, schema: 'S' };
     expect(formatEndpoint({ ...base, driver: 'oracle' })).toBe('h:1521/X');
@@ -106,6 +112,7 @@ describe('Trino SSO (custom)', () => {
     const r = buildCustomRequest(base, false);
     expect(r.auth).toEqual({ type: 'trino-external' });
     expect(r.profile.options?.externalAuthTimeoutSec).toBe(180);
+    expect(buildCustomRequest({ ...base, ssl: false }, false).profile.options?.ssl).toBe(true);
   });
   it('is ignored for other drivers', () => {
     const pg = { ...base, driver: 'postgresql' as const };

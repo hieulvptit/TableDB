@@ -39,6 +39,9 @@ public final class TrinoVendor extends Vendor {
         pr.setProperty("user", p.username != null ? p.username : "tabledb");
         pr.setProperty("SSL", Boolean.toString(p.ssl));
         pr.setProperty("validateConnection", "true"); // run a probe at open so auth happens in session.open
+        // Driver logs request URL, HTTP response status and timing to sidecar stderr.
+        // BASIC omits headers, SQL request bodies and result data.
+        pr.setProperty("httpLoggingLevel", "BASIC");
         switch (p.authType) {
             case "password" -> pr.setProperty("password", p.password == null ? "" : p.password);
             case "trino-jwt" -> pr.setProperty("accessToken", p.token);
@@ -83,6 +86,8 @@ public final class TrinoVendor extends Vendor {
         data.put("sessionId", Session.CURRENT.get());
         data.put("url", uri.toString());
         data.put("purpose", "trino-sso");
+        Profile.Proxy proxy = Session.CURRENT_PROXY.get();
+        if (proxy != null && proxy.type().equals("http")) data.put("proxyUrl", "http://" + proxy.host() + ":" + proxy.port() + "/");
         bus.emit("auth.openUrl", data);
         Log.info("auth.openUrl emitted");
     }

@@ -11,6 +11,7 @@ import java.util.concurrent.locks.ReentrantLock;
 public final class Session {
     /** Session bound to the thread currently executing a request (used to attribute driver callbacks such as SSO redirects). */
     public static final ThreadLocal<String> CURRENT = new ThreadLocal<>();
+    public static final ThreadLocal<Profile.Proxy> CURRENT_PROXY = new ThreadLocal<>();
 
     public final String id;
     public final Profile profile;
