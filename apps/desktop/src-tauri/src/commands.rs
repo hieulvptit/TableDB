@@ -243,6 +243,10 @@ pub async fn genai_login_begin(app: AppHandle, state: State<'_, AppState>, mut p
         } else {
             config.proxy.url.as_deref()
         };
+        log::info!(
+            "genai: login browser={:?}, SSO bridge={}, browser proxy configured={}",
+            config.genai_login_browser, proxy_bridge.is_some(), browser_proxy.is_some(),
+        );
         let mut browser = None;
         let res = match config.genai_login_browser {
             GenaiBrowser::Internal => {

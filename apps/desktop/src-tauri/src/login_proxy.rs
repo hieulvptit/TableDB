@@ -187,7 +187,7 @@ pub fn validate_proxy(raw: &str) -> Result<Url, AppError> {
 
 fn allowed_host(host: &str, broker_hosts: &[String]) -> bool {
     broker_hosts.iter().any(|h| h == host)
-        || matches!(host, "sso.vnpay.vn" | "genai.vnpay.vn")
+        || matches!(host, "sso.vnpay.vn" | "s2o.vnpay.vn" | "genai.vnpay.vn")
         || ["google.com", "gstatic.com", "googleusercontent.com"]
             .iter()
             .any(|base| host == *base || host.ends_with(&format!(".{base}")))
@@ -242,11 +242,14 @@ async fn tunnel(
 ) -> std::io::Result<()> {
     let header = read_header(&mut client).await?;
     let Some(target) = connect_target(&header, hosts) else {
+        log::warn!("SSO proxy rejected CONNECT target or request");
         client
             .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             .await?;
         return Ok(());
     };
+    // Only the validated host and port are logged; never auth or full login URLs.
+    log::info!("SSO proxy CONNECT via upstream: {target}");
     let mut remote = tokio::time::timeout(
         Duration::from_secs(15),
         TcpStream::connect((
@@ -272,7 +275,7 @@ async fn tunnel(
         .unwrap_or("");
     if status != "200" {
         log::warn!(
-            "SSO proxy refused CONNECT (status {})",
+            "SSO proxy refused CONNECT to {target} (status {})",
             status.parse::<u16>().unwrap_or(0)
         );
         client
@@ -285,6 +288,7 @@ async fn tunnel(
     client
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await?;
+    log::info!("SSO proxy tunnel established: {target}");
     // TLS stays end-to-end between the browser and destination; only CONNECT uses proxy auth.
     let _ = tokio::time::timeout(
         Duration::from_secs(600),
@@ -556,6 +560,7 @@ mod tests {
         let hosts = vec!["genai.vnpay.vn".to_string()];
         for target in [
             "sso.vnpay.vn:443",
+            "s2o.vnpay.vn:443",
             "genai.vnpay.vn:443",
             "accounts.google.com:443",
             "ssl.gstatic.com:443",
@@ -571,6 +576,9 @@ mod tests {
             "10.23.5.40:8080",
             "example.com:443",
             "accounts.google.com.evil.com:443",
+            "s2o.vnpay.vn.evil.com:443",
+            "sub.s2o.vnpay.vn:443",
+            "s2o.vnpay.vn:80",
             "accounts.google.com:80",
         ] {
             assert!(connect_target(
@@ -583,25 +591,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authenticates_upstream_and_preserves_tunnel_bytes() {
+    async fn redirect_hosts_use_same_authenticated_proxy_session() {
+        let targets = [
+            "genai.vnpay.vn:443",
+            "s2o.vnpay.vn:443",
+            "accounts.google.com:443",
+            "ssl.gstatic.com:443",
+            "lh3.googleusercontent.com:443",
+            "s2o.vnpay.vn:443",
+            "genai.vnpay.vn:443",
+        ];
         let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let upstream_url =
             Url::parse(&format!("http://{}", upstream.local_addr().unwrap())).unwrap();
         let server = tokio::spawn(async move {
-            let (mut stream, _) = upstream.accept().await.unwrap();
-            let request = String::from_utf8(read_header(&mut stream).await.unwrap()).unwrap();
-            assert!(request.starts_with("CONNECT accounts.google.com:443 HTTP/1.1\r\n"));
-            assert!(request.contains(&format!(
-                "Proxy-Authorization: Basic {}\r\n",
-                STANDARD.encode("test-user:test-pass")
-            )));
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\n\r\nSERVER")
-                .await
-                .unwrap();
-            let mut data = [0; 6];
-            stream.read_exact(&mut data).await.unwrap();
-            assert_eq!(&data, b"CLIENT");
+            for target in targets {
+                let (mut stream, _) = upstream.accept().await.unwrap();
+                let request = String::from_utf8(read_header(&mut stream).await.unwrap()).unwrap();
+                assert!(request.starts_with(&format!("CONNECT {target} HTTP/1.1\r\n")));
+                assert!(request.contains(&format!(
+                    "Proxy-Authorization: Basic {}\r\n",
+                    STANDARD.encode("test-user:test-pass")
+                )));
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\n\r\nSERVER")
+                    .await
+                    .unwrap();
+                let mut data = [0; 6];
+                stream.read_exact(&mut data).await.unwrap();
+                assert_eq!(&data, b"CLIENT");
+            }
         });
         let bridge = LoginProxy::start(
             upstream_url,
@@ -610,24 +629,24 @@ mod tests {
         )
         .await
         .unwrap();
-        let mut client = TcpStream::connect(("127.0.0.1", bridge.url.port().unwrap()))
-            .await
-            .unwrap();
-        client
-            .write_all(b"CONNECT accounts.google.com:443 HTTP/1.1\r\n\r\n")
-            .await
-            .unwrap();
-        let response = read_header(&mut client).await.unwrap();
-        assert!(!String::from_utf8(response)
-            .unwrap()
-            .contains("Proxy-Authorization"));
-        client.write_all(b"CLIENT").await.unwrap();
-        let mut data = [0; 6];
-        client.read_exact(&mut data).await.unwrap();
-        assert_eq!(&data, b"SERVER");
+        for target in targets {
+            let mut client = TcpStream::connect(("127.0.0.1", bridge.url.port().unwrap()))
+                .await
+                .unwrap();
+            client
+                .write_all(format!("CONNECT {target} HTTP/1.1\r\n\r\n").as_bytes())
+                .await
+                .unwrap();
+            let response = read_header(&mut client).await.unwrap();
+            assert!(response.starts_with(b"HTTP/1.1 200 Connection Established\r\n"));
+            assert!(!String::from_utf8(response).unwrap().contains("Proxy-Authorization"));
+            client.write_all(b"CLIENT").await.unwrap();
+            let mut data = [0; 6];
+            client.read_exact(&mut data).await.unwrap();
+            assert_eq!(&data, b"SERVER");
+        }
         server.await.unwrap();
         let port = bridge.url.port().unwrap();
-        drop(client);
         drop(bridge);
         tokio::task::yield_now().await;
         assert!(TcpStream::connect(("127.0.0.1", port)).await.is_err());

@@ -530,6 +530,8 @@ mod tests {
         // https is fine, everything else is not
         assert_eq!(d("https://genai.vnpay.vn/create-jwt-token?connectid=1"), NavDecision::Allow);
         assert_eq!(d("https://sso.vnpay.vn/login"), NavDecision::Allow);
+        assert_eq!(d("https://s2o.vnpay.vn/auth/realms/VNPAY/broker/google/login"), NavDecision::Allow);
+        assert_eq!(d("https://accounts.google.com/o/oauth2/v2/auth"), NavDecision::Allow);
         for bad in [
             "http://genai.vnpay.vn/x",
             "http://localhost:2/sso-callback?token=a.b.c",

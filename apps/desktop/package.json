@@ -1,6 +1,6 @@
 {
   "name": "@tabledb/desktop",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "private": true,
   "description": "Tauri 2 Windows shell for VNPAY TableDB",
   "scripts": {

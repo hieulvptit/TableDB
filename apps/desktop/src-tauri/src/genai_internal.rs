@@ -96,6 +96,13 @@ pub async fn run(
 ) -> Result<GenaiLoginResult, AppError> {
     let base = check_login_url(&params.login_url, allowed_origins)?;
     let proxy = webview_proxy(proxy)?;
+    #[cfg(windows)]
+    log::info!(
+        "genai: WebView2 proxy configured={}, browser arguments override present={}, user data folder override present={}",
+        proxy.is_some(),
+        std::env::var_os("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_some(),
+        std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").is_some(),
+    );
     let secs = params.timeout_sec.unwrap_or(300).clamp(5, 600);
     let url = build_login_url(&base, &connect_port.to_string());
 
