@@ -303,7 +303,13 @@ async fn tunnel(
     };
     client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await?;
     log::info!("SSO tunnel established: {target}");
-    let _ = tokio::time::timeout(Duration::from_secs(600), tokio::io::copy_bidirectional(&mut client, &mut remote)).await;
+    let database_route = !extra_targets.read().unwrap().is_empty();
+    if database_route {
+        // JDBC may reuse a keep-alive socket for many queries. Its owning session closes the bridge.
+        let _ = tokio::io::copy_bidirectional(&mut client, &mut remote).await;
+    } else {
+        let _ = tokio::time::timeout(Duration::from_secs(600), tokio::io::copy_bidirectional(&mut client, &mut remote)).await;
+    }
     Ok(())
 }
 
@@ -703,6 +709,7 @@ mod tests {
             "lh3.googleusercontent.com:443",
             "s2o.vnpay.vn:443",
             "genai.vnpay.vn:443",
+            "trino.internal:8443",
         ];
         let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let upstream_url =
@@ -732,6 +739,7 @@ mod tests {
         )
         .await
         .unwrap();
+        bridge.allow_coordinator("trino.internal", 8443).unwrap();
         for target in targets {
             let mut client = TcpStream::connect(("127.0.0.1", bridge.url.port().unwrap()))
                 .await
