@@ -185,12 +185,20 @@ pub fn validate_proxy(raw: &str) -> Result<Url, AppError> {
     Ok(u)
 }
 
-fn allowed_host(host: &str, broker_hosts: &[String]) -> bool {
-    broker_hosts.iter().any(|h| h == host)
-        || matches!(host, "sso.vnpay.vn" | "s2o.vnpay.vn" | "genai.vnpay.vn")
-        || ["google.com", "gstatic.com", "googleusercontent.com"]
-            .iter()
-            .any(|base| host == *base || host.ends_with(&format!(".{base}")))
+/// Any public DNS name on :443 is tunnelled; the upstream Squid enforces the real domain allowlist
+/// (Google redirects across ccTLDs such as google.com.vn). IP literals and bare/local names stay blocked
+/// so the bridge cannot be pointed at loopback or internal addresses.
+fn allowed_host(host: &str, _broker_hosts: &[String]) -> bool {
+    host.contains('.')
+        && !host.starts_with('.')
+        && !host.ends_with('.')
+        && !host.contains("..")
+        && host != "localhost"
+        && !host.ends_with(".localhost")
+        && host
+            .rsplit('.')
+            .next()
+            .is_some_and(|tld| tld.bytes().any(|c| c.is_ascii_alphabetic()))
 }
 
 fn connect_target(header: &[u8], broker_hosts: &[String]) -> Option<String> {
@@ -556,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn blocks_non_sso_hosts_and_non_tls_ports() {
+    fn allows_dns_redirects_and_blocks_local_targets_and_non_tls_ports() {
         let hosts = vec!["genai.vnpay.vn".to_string()];
         for target in [
             "sso.vnpay.vn:443",
@@ -564,6 +572,9 @@ mod tests {
             "genai.vnpay.vn:443",
             "accounts.google.com:443",
             "ssl.gstatic.com:443",
+            "www.google.com.vn:443",
+            "example.com:443",
+            "sub.s2o.vnpay.vn:443",
         ] {
             assert!(connect_target(
                 format!("CONNECT {target} HTTP/1.1\r\n\r\n").as_bytes(),
@@ -574,10 +585,14 @@ mod tests {
         for target in [
             "127.0.0.1:443",
             "10.23.5.40:8080",
-            "example.com:443",
-            "accounts.google.com.evil.com:443",
-            "s2o.vnpay.vn.evil.com:443",
-            "sub.s2o.vnpay.vn:443",
+            "10.23.5.40:443",
+            "[::1]:443",
+            "localhost:443",
+            "app.localhost:443",
+            "intranet:443",
+            ".google.com:443",
+            "google.com.:443",
+            "google..com:443",
             "s2o.vnpay.vn:80",
             "accounts.google.com:80",
         ] {

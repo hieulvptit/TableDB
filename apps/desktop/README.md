@@ -89,11 +89,11 @@ or SSO login. A proxy that does not require authentication can accept any creden
 
 The app runs a loopback CONNECT bridge only for the active login session. It sends
 Basic proxy authentication to the upstream proxy, forwards TLS without decrypting
-it, and restricts tunnels to the configured broker hosts, `sso.vnpay.vn`, `s2o.vnpay.vn`,
-`genai.vnpay.vn`, and Google login/resource domains (`google.com`, `gstatic.com`,
-`googleusercontent.com` and their subdomains). Both `genai.vnpay.vn:443` and
-redirects to `s2o.vnpay.vn:443`, then `accounts.google.com:443`, use the upstream proxy in internal and system
-login browsers when using the SSO bridge. The bridge and its tunnels stop on
+it, and accepts DNS hostnames on port 443, including Google country-domain redirects
+such as `google.com.vn`. IP literals, bare hostnames and localhost names are blocked.
+The upstream proxy enforces the destination domain allowlist. All redirect tunnels
+use the same authenticated upstream proxy session.
+The bridge and its tunnels stop on
 success, cancellation, timeout or error.
 
 For runtime diagnosis, the log records `SSO proxy CONNECT via upstream: <host>:443`
