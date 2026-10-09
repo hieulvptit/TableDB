@@ -63,13 +63,21 @@ def sha256(path):
     return digest.hexdigest()
 
 
+def source_commit():
+    # Container checkouts can belong to the runner UID rather than the container user.
+    # Trust only this checkout for this command; do not change global Git configuration.
+    return subprocess.check_output([
+        "git", "-c", f"safe.directory={ROOT}", "rev-parse", "HEAD",
+    ], cwd=ROOT, text=True).strip()
+
+
 def frontend_manifest():
     dist = ROOT / "apps/web/dist"
     if not (dist / "index.html").is_file():
         raise ValueError("Desktop frontend index.html missing")
     info = {
         "version": json.loads((TAURI / "tauri.conf.json").read_text())["version"],
-        "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+        "commit": source_commit(),
         "files": {p.relative_to(dist).as_posix(): sha256(p) for p in sorted(dist.rglob("*"))
                   if p.is_file() and p.name != "BUILDINFO.json"},
     }
@@ -80,7 +88,7 @@ def prepare():
     dist = ROOT / "apps/web/dist"
     info = json.loads((dist / "BUILDINFO.json").read_text(encoding="utf-8"))
     version = json.loads((TAURI / "tauri.conf.json").read_text())["version"]
-    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    commit = source_commit()
     if info["version"] != version or info["commit"] != commit:
         raise ValueError("Desktop frontend came from a different version or commit")
     for name, expected in info["files"].items():
