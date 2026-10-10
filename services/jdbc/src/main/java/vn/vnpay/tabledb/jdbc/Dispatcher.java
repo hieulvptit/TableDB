@@ -222,16 +222,23 @@ public final class Dispatcher implements AutoCloseable {
         DriverShim shim = shimFor(prof);
         long t0 = System.nanoTime();
         String prev = Session.CURRENT.get();
+        Profile.Proxy previousProxy = Session.CURRENT_PROXY.get();
         Session.CURRENT.set(sid);
+        Session.CURRENT_PROXY.set(prof.proxy);
         Connection c = null;
         Tunnel tunnel = null;
+        String stage = "route";
+        ConnectDiagnostics.event("db.connect request", prof, sid, stage, t0);
         try {
             Profile eff = prof;
             if (Tunnel.needed(prof)) {
                 tunnel = Tunnel.open(prof, sshKeys);
                 eff = prof.routedTo(tunnel.host, tunnel.port);
             }
+            stage = "jdbc_connect";
+            ConnectDiagnostics.event("db.connect dialing", eff, sid, stage, t0);
             c = v.connect(shim, eff);
+            stage = "session_setup";
             c.setAutoCommit(true);
             v.afterConnect(c, eff);
             try {
@@ -245,18 +252,23 @@ public final class Dispatcher implements AutoCloseable {
             try { ver = md.getDatabaseProductVersion(); } catch (SQLException | RuntimeException e) { Log.warn("server version unavailable: " + e.getClass().getSimpleName()); }
             try { user = md.getUserName(); } catch (SQLException | RuntimeException e) { Log.warn("user name unavailable: " + e.getClass().getSimpleName()); }
             if (ver != null && ver.indexOf('\n') > 0) ver = ver.substring(0, ver.indexOf('\n'));
+            ConnectDiagnostics.event("db.connect success", eff, sid, "ready", t0);
             return new Session(sid, eff, v, c, ver, user != null ? user : prof.username, tunnel);
         } catch (SQLException e) {
+            ConnectDiagnostics.failure(prof, sid, stage, t0, e, tunnel);
             closeQuietly(c);
             throw closeTunnel(tunnel, mapConnectError(e, prof, t0));
         } catch (RpcError e) {
+            ConnectDiagnostics.failure(prof, sid, stage, t0, e, tunnel);
             closeQuietly(c);
             throw closeTunnel(tunnel, e);
         } catch (RuntimeException e) {
+            ConnectDiagnostics.failure(prof, sid, stage, t0, e, tunnel);
             closeQuietly(c);
             throw closeTunnel(tunnel, mapConnectError(new SQLException(String.valueOf(e.getMessage())), prof, t0));
         } finally {
             if (prev == null) Session.CURRENT.remove(); else Session.CURRENT.set(prev);
+            if (previousProxy == null) Session.CURRENT_PROXY.remove(); else Session.CURRENT_PROXY.set(previousProxy);
         }
     }
 
@@ -406,11 +418,13 @@ public final class Dispatcher implements AutoCloseable {
                 if (s.closed) throw RpcError.notFound("unknown session");
                 s.touch();
                 Session.CURRENT.set(s.id);
+                Session.CURRENT_PROXY.set(s.profile.proxy);
                 return fn.apply(s);
             } catch (SQLException e) {
                 throw RpcError.fromSql(e, s.profile.secrets());
             } finally {
                 Session.CURRENT.remove();
+                Session.CURRENT_PROXY.remove();
                 s.touch();
                 s.lock.unlock();
             }

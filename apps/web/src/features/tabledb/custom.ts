@@ -47,14 +47,14 @@ export interface CustomForm {
 }
 
 export const emptyCustomForm = (): CustomForm => ({
-  driver: 'oracle', host: '', port: String(DEFAULT_PORTS.oracle), connectType: 'serviceName', database: '', ssl: false,
+  driver: 'trino', host: '', port: String(DEFAULT_PORTS.trino), connectType: 'serviceName', database: '', ssl: false,
   connectTimeoutSec: String(dbRuntimeConfig().connectTimeoutSec), props: [], allowWrite: false, username: '', password: '', schema: '', sso: false,
 });
 
 /** SSO is effective only for Trino. */
 export const usesSso = (f: Pick<CustomForm, 'driver' | 'sso'>) => f.driver === 'trino' && f.sso;
 
-export interface ParsedEndpoint { host: string; port?: number; database?: string; connectType?: ConnectType; schema?: string }
+export interface ParsedEndpoint { host: string; port?: number; ssl?: boolean; database?: string; connectType?: ConnectType; schema?: string }
 
 /**
  * Quick-paste parser, per driver.
@@ -73,11 +73,13 @@ export function parseEndpoint(input: string, driver: CustomDriver = 'oracle'): P
     if (!m) return null;
     return finishEndpoint(m[1]!, m[2], m[3] && m[4] ? { database: m[4], connectType: m[3] === '/' ? 'serviceName' : 'sid' } : {});
   }
+  const scheme = /^(https?):\/\//i.exec(s)?.[1]?.toLowerCase();
   s = s.replace(/^jdbc:(?:postgresql|trino|presto):/i, '').replace(/^(?:postgres(?:ql)?|trino|presto|https?):\/\//i, '').replace(/^\/\//, '');
   s = s.replace(/[?#].*$/, '').replace(/^[^@/\s]*@/, '');
   const m = /^(\[[^\]\s]+\]|[^:/\s]+)(?::(\d{1,5}))?(?:\/([^\s/:]+)(?:\/([^\s/:]+))?)?\/?$/.exec(s);
   if (!m) return null;
-  return finishEndpoint(m[1]!, m[2], {
+  return finishEndpoint(m[1]!, m[2] ?? (scheme ? (scheme === 'https' ? '443' : '80') : undefined), {
+    ...(scheme ? { ssl: scheme === 'https' } : {}),
     ...(m[3] ? { database: m[3] } : {}),
     ...(m[4] && driver === 'trino' ? { schema: m[4] } : {}),
   });
@@ -179,7 +181,7 @@ export function buildCustomRequest(f: CustomForm, canWrite: boolean): SessionReq
     host: f.host.trim(), port: Number(f.port), ...(database ? { database } : {}),
     options: {
       ...(f.driver === 'oracle' ? { connectType: f.connectType } : {}),
-      ssl: f.ssl, readOnly: true, allowWrite: canWrite && f.allowWrite,
+      ssl: f.ssl || usesSso(f), readOnly: true, allowWrite: canWrite && f.allowWrite,
       connectTimeoutSec: Number(f.connectTimeoutSec),
       ...(usesSso(f) ? { externalAuthTimeoutSec: dbRuntimeConfig().externalAuthTimeoutSec } : {}),
       ...(Object.keys(props).length > 0 ? { props } : {}),

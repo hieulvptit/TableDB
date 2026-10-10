@@ -250,6 +250,9 @@ func TestRejectionDiagnostics(t *testing.T) {
 			if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil || response.Error.Code != entry["code"] || response.Error.Message != "secure transport rejected request" {
 				t.Fatal("public error response changed")
 			}
+			if tc.reason == "frame_authentication_failed" && response.Error.Code != "SECURE_KEY_MISMATCH" {
+				t.Fatalf("key mismatch code: %s", response.Error.Code)
+			}
 		})
 	}
 }

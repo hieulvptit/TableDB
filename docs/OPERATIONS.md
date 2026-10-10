@@ -90,6 +90,8 @@ Lỗi API có `code`, `error`, `error_type`, `status`, `method`, `route` (mẫu 
 
 Lỗi transport ghi `secure transport rejected request` với `code`, `reason` và `stage` khi lỗi frame. Các trường `record_index`, `expected_bytes`, `received_bytes` chỉ vị trí và kích thước lỗi; không chứa nội dung gói. Ví dụ lỗi do tiền tố `/c/` còn nằm trong metadata:
 
+`SECURE_KEY_MISMATCH` (HTTP 400) là lỗi xác thực AES-GCM: khóa phiên không khớp hoặc ciphertext bị thay đổi. Client bỏ phiên mã hóa cũ và handshake lại, rồi gửi lại request tối đa một lần; `SECURE_SESSION_EXPIRED` (HTTP 410, kể cả sau restart API) dùng cùng cơ chế. Cả hai lỗi đều được trả trước khi xử lý API nghiệp vụ. Client không tự gửi lại khi lỗi mạng, response giải mã thất bại hoặc mã lỗi khác, vì chưa xác định request trước đã được xử lý hay chưa. `SECURE_SERVER_KEY_MISMATCH` phía client là khóa chữ ký server không khớp khóa tin cậy; cần sửa cấu hình/build, không tự thay khóa tin cậy. Desktop cần bản build mới để áp dụng client tự phục hồi phiên.
+
 ```json
 {"level":"WARN","msg":"secure transport rejected request","request_id":"55f0e270917808f3","status":400,"code":"SECURE_REQUEST","reason":"invalid_api_path","expected_path_prefix":"/api/v1/","received_path_prefix":"/c/api/v1/"}
 ```

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { GatewayError, type DbGateway } from '../../gateway/types';
 import { openConnection } from './connect';
 import { emptyCustomForm } from './custom';
+import { desktopCommands } from '../../runtime/tauri';
 
 /** fake sidecar whose sessions can be reaped */
 function sidecar() {
@@ -24,6 +25,19 @@ const form = () => ({ ...emptyCustomForm(), driver: 'postgresql' as const, host:
 const audit = { report: vi.fn() };
 
 describe('openConnection: automatic reconnect', () => {
+  it.each([true, false])('opens SSO once when native browserHandled=%s', async (handled) => {
+    const sc = sidecar();
+    const opened = vi.spyOn(desktopCommands, 'openExternal').mockResolvedValue(undefined);
+    const onSsoUrl = vi.fn();
+    sc.gw.subscribePending = (cb) => {
+      cb({ event: 'auth.openUrl', seq: 1, data: { url: 'https://s2o.vnpay.vn/login', browserHandled: handled } });
+      return () => {};
+    };
+    await openConnection({ custom: { ...emptyCustomForm(), host: 'query-engine-staging.vnpayapi.vn', port: '443', ssl: true, sso: true }, canWrite: false }, { onSsoUrl }, sc.gw, audit);
+    expect(onSsoUrl).toHaveBeenCalledWith('https://s2o.vnpay.vn/login');
+    expect(opened).toHaveBeenCalledTimes(handled ? 0 : 1);
+    opened.mockRestore();
+  });
   it('a reaped session is reopened (same schema) and the call succeeds', async () => {
     const sc = sidecar();
     const conn = await openConnection({ custom: form(), canWrite: false }, undefined, sc.gw, audit);

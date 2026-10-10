@@ -11,9 +11,10 @@ import { HOST_RE } from './custom';
 export type ProxyType = 'http' | 'socks';
 export type SshAuthType = 'password' | 'publicKey';
 export const MAX_HOPS = 4;
+export const DEFAULT_DB_PROXY = { type: 'http' as const, host: '10.23.5.189', port: 3359, username: 'de_team' };
 export const HOST_KEY_RE = /^SHA256:[A-Za-z0-9+/]{43}$/;
 
-export interface ProxyForm { type: ProxyType; host: string; port: string; username: string; password: string }
+export interface ProxyForm { useDefault?: boolean; type: ProxyType; host: string; port: string; username: string; password: string }
 export interface HopForm {
   host: string; port: string; username: string; authType: SshAuthType;
   password: string; keyId: string; passphrase: string;
@@ -41,7 +42,7 @@ const printable = (s: string) => !/[\u0000-\u001f\u007f]/.test(s);
 /** @param proxyFromCatalog the admin catalog already fixes the proxy: the user's proxy fields are ignored */
 export function validateNetwork(n: NetworkForm, proxyFromCatalog = false): NetworkIssue[] {
   const out: NetworkIssue[] = [];
-  if (n.useProxy && !proxyFromCatalog) {
+  if (n.useProxy && !proxyFromCatalog && !n.proxy.useDefault) {
     if (!HOST_RE.test(n.proxy.host.trim())) out.push('proxy.host');
     if (!validPort(n.proxy.port)) out.push('proxy.port');
     if (n.proxy.password && !n.proxy.username.trim()) out.push('proxy.username');
@@ -72,7 +73,7 @@ export function buildNetwork(n: NetworkForm | undefined, proxyFromCatalog = fals
     const u = f.proxy.username.trim();
     const proxy: ProxySpec = { type: f.proxy.type, host: f.proxy.host.trim(), port: Number(f.proxy.port) };
     if (u) { proxy.username = u; proxy.password = f.proxy.password; }
-    out.proxy = proxy;
+    out.proxy = f.proxy.useDefault ? { ...DEFAULT_DB_PROXY, useDefault: true } : proxy;
   }
   if (f.useSsh && f.hops.length > 0) {
     out.ssh = {
@@ -92,7 +93,7 @@ export function buildNetwork(n: NetworkForm | undefined, proxyFromCatalog = fals
 // ---- persistence: non-secret fields in localStorage, secrets (one JSON item) in the OS credential store ----
 
 export interface NetworkProfileFields {
-  useProxy: boolean; proxy: { type: ProxyType; host: string; port: string; username: string };
+  useProxy: boolean; proxy: { useDefault?: boolean; type: ProxyType; host: string; port: string; username: string };
   useSsh: boolean; hops: Array<Omit<HopForm, 'password' | 'passphrase'>>; keepAliveSec: string;
 }
 export interface NetworkSecrets { proxy?: string; hops: Array<{ password?: string; passphrase?: string }> }
@@ -104,7 +105,7 @@ export function networkFields(n: NetworkForm | NetworkProfileFields): NetworkPro
   const hops = (Array.isArray(n.hops) ? n.hops : []).slice(0, MAX_HOPS);
   return {
     useProxy: n.useProxy === true,
-    proxy: { type: n.proxy?.type === 'http' ? 'http' : 'socks', host: s(n.proxy?.host), port: s(n.proxy?.port, '1080'), username: s(n.proxy?.username) },
+    proxy: { ...(n.proxy?.useDefault ? { useDefault: true } : {}), type: n.proxy?.type === 'http' ? 'http' : 'socks', host: s(n.proxy?.host), port: s(n.proxy?.port, '1080'), username: s(n.proxy?.username) },
     useSsh: n.useSsh === true,
     hops: hops.map((h) => ({
       host: s(h?.host), port: s(h?.port, '22'), username: s(h?.username), authType: h?.authType === 'publicKey' ? 'publicKey' : 'password',
@@ -116,7 +117,7 @@ export function networkFields(n: NetworkForm | NetworkProfileFields): NetworkPro
 
 export function networkSecrets(n: NetworkForm): NetworkSecrets | null {
   const hops = n.hops.map((h) => ({ ...(h.authType === 'password' && h.password ? { password: h.password } : {}), ...(h.authType === 'publicKey' && h.passphrase ? { passphrase: h.passphrase } : {}) }));
-  const proxy = n.useProxy && n.proxy.password ? n.proxy.password : undefined;
+  const proxy = n.useProxy && !n.proxy.useDefault && n.proxy.password ? n.proxy.password : undefined;
   if (!proxy && !hops.some((h) => h.password || h.passphrase)) return null;
   return { ...(proxy ? { proxy } : {}), hops };
 }
@@ -168,7 +169,7 @@ export function pinHostKey(n: NetworkForm, hop: number, fingerprint: string): Ne
 export function routeLabel(n: NetworkForm | NetworkProfileFields | undefined, proxyFromCatalog?: { type: ProxyType; host: string; port: number } | null): string {
   if (!n || !(n.useProxy || n.useSsh)) return '';
   const parts: string[] = [];
-  const px = proxyFromCatalog ?? (n.useProxy ? { type: n.proxy.type, host: n.proxy.host.trim(), port: n.proxy.port } : null);
+  const px = proxyFromCatalog ?? (n.useProxy ? (n.proxy.useDefault ? DEFAULT_DB_PROXY : { type: n.proxy.type, host: n.proxy.host.trim(), port: n.proxy.port }) : null);
   if (px) parts.push(`${px.type === 'socks' ? 'SOCKS5' : 'HTTP'} ${px.host}:${px.port}`);
   if (n.useSsh) parts.push(`SSH ${n.hops.map((h) => `${h.host.trim()}:${h.port}`).join(' → ')}`);
   return parts.join(' → ');

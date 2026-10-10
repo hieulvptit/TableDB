@@ -244,7 +244,13 @@ func (t *Transport) rejectRecord(w http.ResponseWriter, r *http.Request, stage s
 			fields = append(fields, "error", detail.cause.Error())
 		}
 	}
-	t.reject(w, r, 400, "SECURE_RECORD", reason, fields...)
+	code := "SECURE_RECORD"
+	if reason == "frame_authentication_failed" {
+		// AEAD failure means incompatible session keys or altered ciphertext.
+		// Both are rejected before dispatch; clients must discard the session.
+		code = "SECURE_KEY_MISMATCH"
+	}
+	t.reject(w, r, 400, code, reason, fields...)
 }
 
 func diagnosticText(value string) string {

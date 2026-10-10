@@ -56,11 +56,46 @@ def api_origin():
 
 
 def sha256(path):
+    digest = hashlib.sha256()
     with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def source_commit():
+    # Container checkouts can belong to the runner UID rather than the container user.
+    # Trust only this checkout for this command; do not change global Git configuration.
+    return subprocess.check_output([
+        "git", "-c", f"safe.directory={ROOT}", "rev-parse", "HEAD",
+    ], cwd=ROOT, text=True).strip()
+
+
+def frontend_manifest():
+    dist = ROOT / "apps/web/dist"
+    if not (dist / "index.html").is_file():
+        raise ValueError("Desktop frontend index.html missing")
+    info = {
+        "version": json.loads((TAURI / "tauri.conf.json").read_text())["version"],
+        "commit": source_commit(),
+        "files": {p.relative_to(dist).as_posix(): sha256(p) for p in sorted(dist.rglob("*"))
+                  if p.is_file() and p.name != "BUILDINFO.json"},
+    }
+    (dist / "BUILDINFO.json").write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
 
 
 def prepare():
+    dist = ROOT / "apps/web/dist"
+    info = json.loads((dist / "BUILDINFO.json").read_text(encoding="utf-8"))
+    version = json.loads((TAURI / "tauri.conf.json").read_text())["version"]
+    commit = source_commit()
+    if info["version"] != version or info["commit"] != commit:
+        raise ValueError("Desktop frontend came from a different version or commit")
+    for name, expected in info["files"].items():
+        path = dist / name
+        if not path.is_file() or sha256(path) != expected:
+            raise ValueError(f"Desktop frontend checksum mismatch: {name}")
+    print(f"Verified desktop frontend {version} from {commit}")
     base_url = api_origin()
     parsed = urlsplit(base_url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
@@ -160,10 +195,11 @@ def collect():
         if destination.exists():
             raise ValueError(f"Duplicate installer filename: {path.name}")
         shutil.copy2(path, destination)
+    shutil.copy2(ROOT / "apps/web/dist/BUILDINFO.json", output / "BUILDINFO.json")
     sums = [f"{sha256(path)}  {path.name}" for path in sorted(output.iterdir())]
     (output / "SHA256SUMS.txt").write_text("\n".join(sums) + "\n", encoding="utf-8", newline="\n")
 
 
 if __name__ == "__main__":
-    commands = {"validate": validate, "prepare": prepare, "verify-appimage": verify_appimage, "collect": collect}
+    commands = {"validate": validate, "frontend-manifest": frontend_manifest, "prepare": prepare, "verify-appimage": verify_appimage, "collect": collect}
     commands[sys.argv[1]]()

@@ -23,6 +23,7 @@ pub struct AppState {
     pub agent_config: std::sync::RwLock<Option<crate::config::AgentConfig>>,
     pub config_error: Option<String>,
     pub sidecar: Arc<SidecarManager>,
+    pub trino_routes: tokio::sync::Mutex<crate::trino_routes::TrinoRoutes>,
     pub oidc_busy: AtomicBool,
     /// Cancel handle of the in-flight genai login (if any).
     pub genai_cancel: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
@@ -48,7 +49,9 @@ pub struct TauriSink(pub AppHandle);
 
 impl EventSink for TauriSink {
     fn emit(&self, ev: &SidecarEvent) {
-        let _ = self.0.emit("sidecar:event", ev);
+        let mut forwarded = ev.clone();
+        if browser_url_for_event(ev).is_some() { forwarded.data["browserHandled"] = Value::Bool(true); }
+        let _ = self.0.emit("sidecar:event", &forwarded);
         match ev.event.as_str() {
             "ready" => {
                 let _ = self.0.emit("sidecar:ready", &ev.data);
@@ -56,11 +59,21 @@ impl EventSink for TauriSink {
             "auth.openUrl" => {
                 let _ = self.0.emit("sidecar:auth-open-url", &ev.data);
                 if let Some(u) = browser_url_for_event(ev) {
-                    if let Err(e) = self.0.opener().open_url(u.as_str(), None::<&str>) {
-                        log::warn!("could not open system browser for SSO: {e}");
-                    } else {
-                        log::info!("opened system browser for trino-sso (host {})", u.host_str().unwrap_or("?"));
-                    }
+                    let app = self.0.clone();
+                    let proxy_url = ev.data.get("proxyUrl").and_then(Value::as_str).map(str::to_string);
+                    tauri::async_runtime::spawn(async move {
+                        if let Some(proxy_url) = proxy_url {
+                            let state = app.state::<AppState>();
+                            let profiles = match app.path().app_cache_dir() { Ok(p) => p, Err(_) => return };
+                            let opened = state.trino_routes.lock().await.open_browser(&u, &proxy_url, &profiles);
+                            match opened {
+                                Ok(true) => { log::info!("opened Trino SSO browser with split proxy routing"); return; }
+                                Err(e) => { log::warn!("could not open Trino SSO browser: {}", e.message); return; }
+                                Ok(false) => {}
+                            }
+                        }
+                        if let Err(e) = app.opener().open_url(u.as_str(), None::<&str>) { log::warn!("could not open system browser for SSO: {e}"); }
+                    });
                 }
             }
             _ => {}
@@ -72,7 +85,17 @@ impl EventSink for TauriSink {
 pub async fn sidecar_request(state: State<'_, AppState>, method: String, params: Option<Value>) -> Result<Value, AppError> {
     state.deployment().await?;
     log::debug!("sidecar_request {method}"); // method only, never params
-    state.sidecar.request(&method, params.unwrap_or(Value::Null)).await
+    let mut params = crate::login_proxy::database_proxy_params(&method, params.unwrap_or(Value::Null), crate::login_proxy::default_proxy_password())?;
+    let session = params.get("sessionId").and_then(Value::as_str).map(str::to_string);
+    let route = state.trino_routes.lock().await.prepare(&method, &mut params).await?;
+    let result = state.sidecar.request(&method, params).await;
+    let mut routes = state.trino_routes.lock().await;
+    if let Some(key) = route { routes.finish(&key, &method, &result); }
+    if result.is_ok() {
+        if method == "session.close" { routes.close(session.as_deref()); }
+        if method == "session.closeAll" { routes.close(None); }
+    }
+    result
 }
 
 #[tauri::command]

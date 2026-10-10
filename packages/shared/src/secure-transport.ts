@@ -34,7 +34,7 @@ export function createSecureFetch(o: SecureFetchOptions): typeof fetch {
     if (w.version !== SECURE_VERSION || !/^[\w-]{32}$/.test(w.sessionId) || !Number.isSafeInteger(w.expiresAt) || w.expiresAt * 1000 <= Date.now() || w.expiresAt * 1000 > Date.now() + 3600000) fail();
     const transcript = enc.encode([SECURE_VERSION, w.sessionId, o.clientKind, publicKey, w.publicKey, challenge, w.nonce, String(w.expiresAt)].join('|'));
     const signing = await crypto.subtle.importKey('raw', bytes(decodeBase64(o.serverPublicKey)), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
-    if (!await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, signing, bytes(decodeBase64(w.signature)), bytes(transcript))) fail();
+    if (!await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, signing, bytes(decodeBase64(w.signature)), bytes(transcript))) throw Object.assign(new Error('Secure API server signing key mismatch'), { code: 'SECURE_SERVER_KEY_MISMATCH' });
     if (decodeBase64(w.nonce).length !== 32) fail();
     const server = await crypto.subtle.importKey('raw', bytes(decodeBase64(w.publicKey)), { name: 'ECDH', namedCurve: 'P-256' }, false, []);
     const secret = await crypto.subtle.deriveBits({ name: 'ECDH', public: server }, keys.privateKey, 256);
@@ -51,7 +51,7 @@ export function createSecureFetch(o: SecureFetchOptions): typeof fetch {
     if (!pending) pending = handshake().then(s => (current = s)).finally(() => { pending = null; });
     return pending;
   }
-  return (async (input: RequestInfo | URL, init: RequestInit = {}) => {
+  async function secureFetch(input: RequestInfo | URL, init: RequestInit = {}, attempt = 0): Promise<Response> {
     if (input instanceof Request) throw new Error('Secure fetch requires a URL and explicit request options');
     const url = new URL(String(input), base);
     if (url.origin !== base.origin || !url.pathname.startsWith(base.pathname) || url.pathname.startsWith(base.pathname + 'secure/')) fail();
@@ -72,14 +72,29 @@ export function createSecureFetch(o: SecureFetchOptions): typeof fetch {
     // the server's canonical namespace because proxies cannot rewrite ciphertext.
     const serverPath = '/api/v1/' + url.pathname.slice(base.pathname.length) + url.search;
     await append(1, enc.encode(JSON.stringify({ method, path: serverPath, headers })));
+    let replayBody: Blob | undefined;
     if (init.body !== undefined && init.body !== null) {
       const body = new Uint8Array(await new Response(init.body).arrayBuffer());
+      replayBody = new Blob([bytes(body)]);
       for (let i = 0; i < body.length; i += FRAME_BYTES) await append(2, body.subarray(i, i + FRAME_BYTES));
     }
     await append(3, new Uint8Array());
     const response = await direct(endpoint('secure/request'), { method: 'POST', credentials: o.clientKind === 'web' ? 'include' : 'omit', headers: { 'Content-Type': CONTENT_TYPE, 'X-TableDB-Session': s.id, 'X-TableDB-Sequence': String(seq) }, body: new Blob(chunks), signal: init.signal, redirect: 'error' });
-    // Never retry a mutation in response to an unauthenticated transport error.
-    if (!response.ok || response.headers.get('content-type') !== CONTENT_TYPE || !response.body) { if (current === s) current = null; await response.body?.cancel(); throw new Error('Encrypted API request failed'); }
+    if (!response.ok || response.headers.get('content-type') !== CONTENT_TYPE || !response.body) {
+      if (current === s) current = null;
+      let code = '';
+      if (response.headers.get('content-type')?.startsWith('application/json')) {
+        try { code = (await response.json()).error?.code ?? ''; } catch { /* Invalid outer response stays fatal. */ }
+      } else await response.body?.cancel();
+      // These server errors occur before the inner handler is dispatched.
+      // Rebuild the encrypted records with a fresh authenticated handshake once.
+      const reset = (response.status === 410 && code === 'SECURE_SESSION_EXPIRED') || (response.status === 400 && code === 'SECURE_KEY_MISMATCH');
+      if (reset && attempt === 0) {
+        init.signal?.throwIfAborted();
+        return secureFetch(input, { ...init, body: replayBody ?? init.body }, 1);
+      }
+      throw Object.assign(new Error('Encrypted API request failed'), { code: code || 'SECURE_TRANSPORT_ERROR' });
+    }
     const reader = response.body.getReader();
     let buffer = new Uint8Array();
     async function exact(n: number): Promise<Uint8Array> {
@@ -90,10 +105,15 @@ export function createSecureFetch(o: SecureFetchOptions): typeof fetch {
     async function record(): Promise<Uint8Array> {
       const prefix = await exact(4); const length = new DataView(prefix.buffer).getUint32(0);
       if (length < 17 || length > FRAME_BYTES + 1024 || responseIndex >= 0xffffffff) fail();
-      const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: bytes(nonce(seq, responseIndex)), additionalData: bytes(aad(s.id, seq, responseIndex++, 's2c')), tagLength: 128 }, s.receive, bytes(await exact(length)));
+      const sealed = await exact(length);
+      let plain: ArrayBuffer;
+      try { plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: bytes(nonce(seq, responseIndex)), additionalData: bytes(aad(s.id, seq, responseIndex++, 's2c')), tagLength: 128 }, s.receive, bytes(sealed)); }
+      catch { if (current === s) current = null; throw Object.assign(new Error('Encrypted response key mismatch or corrupted ciphertext'), { code: 'SECURE_KEY_MISMATCH' }); }
       return new Uint8Array(plain);
     }
-    const first = await record(); if (first[0] !== 1 || first.length > 16385) fail();
+    let first: Uint8Array;
+    try { first = await record(); if (first[0] !== 1 || first.length > 16385) fail(); }
+    catch (error) { if (current === s) current = null; await reader.cancel(error).catch(() => {}); throw error; }
     const meta = JSON.parse(dec.decode(first.subarray(1))) as { status: number; headers: Record<string, string[]> };
     const responseHeaders = new Headers();
     for (const [name, values] of Object.entries(meta.headers)) { if (name.toLowerCase() === 'set-cookie') continue; for (const value of values) responseHeaders.append(name, value); }
@@ -105,11 +125,12 @@ export function createSecureFetch(o: SecureFetchOptions): typeof fetch {
     const stream = new ReadableStream<Uint8Array>({
       async pull(controller) {
         try { const plain = await record(); if (plain[0] === 2 && plain.length > 1) { received += plain.length - 1; if (expected !== null && received > expected) fail(); controller.enqueue(plain.subarray(1)); } else if (plain[0] === 3 && plain.length === 1) { if ((expected !== null && received !== expected) || buffer.length || !(await reader.read()).done) fail(); ended = true; controller.close(); } else fail(); }
-        catch (error) { controller.error(error); await reader.cancel(error).catch(() => {}); }
+        catch (error) { if (current === s) current = null; controller.error(error); await reader.cancel(error).catch(() => {}); }
       },
       cancel(reason) { return reader.cancel(reason); },
     });
     if ([204, 205, 304].includes(meta.status)) { const drain = stream.getReader(); while (!(await drain.read()).done) {} if (!ended) fail(); return new Response(null, { status: meta.status, headers: responseHeaders }); }
     return new Response(stream, { status: meta.status, headers: responseHeaders });
-  }) as typeof fetch;
+  }
+  return ((input, init) => secureFetch(input, init)) as typeof fetch;
 }

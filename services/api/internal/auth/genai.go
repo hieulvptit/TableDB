@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -18,6 +19,7 @@ import (
 	"vnpay/tabledb-api/internal/apperr"
 	"vnpay/tabledb-api/internal/config"
 	"vnpay/tabledb-api/internal/httpx"
+	"vnpay/tabledb-api/internal/reqmeta"
 )
 
 type Identity struct{ Email, Name string }
@@ -137,28 +139,56 @@ func (g *HTTPGenai) Verify(ctx context.Context, token string) (Identity, error) 
 	}
 	req, err := http.NewRequest("GET", g.S.VerifyURL, nil)
 	if err != nil {
+		slog.ErrorContext(ctx, "genai.verify failed", "stage", "request", "broker", brokerEndpoint(g.S.VerifyURL), "cause", "invalid_verify_url")
 		return Identity{}, apperr.NewUpstream("cannot reach the SSO broker")
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/json")
+	started := time.Now()
+	meta, _ := reqmeta.From(ctx)
+	log := slog.Default().With("request_id", meta.RequestID, "method", "GET", "url", brokerURL(g.S.VerifyURL))
+	route, proxy, proxyAuth := g.Out.RouteInfo(httpx.HopGenai)
+	log.InfoContext(ctx, "genai.verify request", "headers", brokerHeaders(req.Header), "body", "", "body_bytes", 0, "route", route, "proxy_url", proxy, "proxy_auth_configured", proxyAuth, "timeout_seconds", 10)
 	res, cancel, err := g.Out.Do(ctx, httpx.HopGenai, req, 10*time.Second)
 	if err != nil {
+		attrs := []any{"stage", "transport", "broker", brokerEndpoint(g.S.VerifyURL), "elapsed_ms", time.Since(started).Milliseconds(), "timeout_seconds", 10}
+		attrs = append(attrs, "error", brokerDiagnosticText(err.Error(), token, g.S.VerifyURL), "response_received", false)
+		log.ErrorContext(ctx, "genai.verify failed", append(attrs, brokerErrorAttrs(err)...)...)
 		return Identity{}, apperr.NewUpstream("cannot reach the SSO broker")
 	}
 	defer cancel()
 	defer res.Body.Close()
+	raw, readErr := io.ReadAll(io.LimitReader(res.Body, (1<<20)+1))
+	finalURL := g.S.VerifyURL
+	if res.Request != nil && res.Request.URL != nil {
+		finalURL = res.Request.URL.String()
+	}
+	responseAttrs := []any{"final_url", brokerURL(finalURL), "http_status", res.StatusCode, "status", res.Status, "headers", brokerHeaders(res.Header), "content_type", res.Header.Get("Content-Type"), "server", res.Header.Get("Server"), "location", brokerURL(res.Header.Get("Location")), "elapsed_ms", time.Since(started).Milliseconds(), "response_body", brokerBodyPreview(raw, token), "response_body_bytes", len(raw), "response_body_truncated", len(raw) > 1<<20, "content_length", res.ContentLength}
+	log.InfoContext(ctx, "genai.verify response", responseAttrs...)
+	if readErr != nil {
+		log.ErrorContext(ctx, "genai.verify failed", "stage", "read_response", "error", brokerDiagnosticText(readErr.Error(), token, g.S.VerifyURL))
+		return Identity{}, apperr.NewUpstream("cannot read the SSO broker response")
+	}
+	if len(raw) > 1<<20 {
+		log.ErrorContext(ctx, "genai.verify failed", "stage", "response", "cause", "response_too_large")
+		return Identity{}, apperr.NewUpstream("SSO broker response is too large")
+	}
 	if res.StatusCode == 401 || res.StatusCode == 403 {
+		slog.WarnContext(ctx, "genai.verify rejected", "broker", brokerEndpoint(g.S.VerifyURL), "http_status", res.StatusCode, "cause", "broker_rejected_token")
 		return Identity{}, apperr.Unauth("token rejected by the SSO broker")
 	}
 	if res.StatusCode < 200 || res.StatusCode > 299 {
+		slog.ErrorContext(ctx, "genai.verify failed", "stage", "response", "broker", brokerEndpoint(g.S.VerifyURL), "http_status", res.StatusCode)
 		return Identity{}, apperr.NewUpstream("SSO broker HTTP " + strconv.Itoa(res.StatusCode))
 	}
 	// a web page (SPA catch-all, login redirect…) is NOT a verification answer, even with HTTP 200
 	if !strings.HasPrefix(strings.ToLower(res.Header.Get("Content-Type")), "application/json") {
+		slog.ErrorContext(ctx, "genai.verify failed", "stage", "response", "broker", brokerEndpoint(g.S.VerifyURL), "cause", "unexpected_content_type", "content_type", res.Header.Get("Content-Type"))
 		return Identity{}, apperr.NewUpstream("SSO broker did not answer with JSON — check GENAI_VERIFY_URL")
 	}
 	var body any
-	if err := json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&body); err != nil {
+	if err := json.NewDecoder(bytes.NewReader(raw)).Decode(&body); err != nil {
+		slog.ErrorContext(ctx, "genai.verify failed", "stage", "response", "broker", brokerEndpoint(g.S.VerifyURL), "cause", "invalid_json")
 		return Identity{}, apperr.NewUpstream("SSO broker returned a non-JSON response")
 	}
 	return IdentityFrom(getPath(body, g.S.EmailPath), getPath(body, g.S.NamePath), g.S)
@@ -250,9 +280,12 @@ func (g *DevUnverifiedGenai) Verify(_ context.Context, token string) (Identity, 
 func NewGenaiVerifier(out *httpx.Outbound, s config.Genai) (GenaiVerifier, error) {
 	switch {
 	case s.JWTKey != "":
+		slog.Info("genai.verifier configured", "mode", "local_hs256", "key_source", "GENAI_JWT_KEY")
 		return NewLocalJWTGenai(s.JWTKey, s)
 	case s.DevTrustUnverified:
+		slog.Warn("genai.verifier configured", "mode", "dev_unverified")
 		return &DevUnverifiedGenai{S: s}, nil
 	}
+	slog.Info("genai.verifier configured", "mode", "http_verify", "broker", brokerEndpoint(s.VerifyURL), "key_source", "none", "configured", s.VerifyURL != "")
 	return &HTTPGenai{Out: out, S: s}, nil
 }

@@ -19,6 +19,16 @@ const sshForm = (): NetworkForm => ({
 });
 
 describe('network settings', () => {
+  it('uses the built-in proxy marker without exposing or persisting its password', () => {
+    const n = { ...emptyNetwork(), useProxy: true };
+    n.proxy = { ...n.proxy, useDefault: true, password: 'old-custom-password' };
+    expect(validateNetwork(n)).toEqual([]);
+    expect(buildNetwork(n)?.proxy).toEqual({ useDefault: true, type: 'http', host: '10.23.5.189', port: 3359, username: 'de_team' });
+    expect(networkSecrets(n)).toBeNull();
+    const restored = restoreNetwork(networkFields(n), null);
+    expect(restored.proxy.useDefault).toBe(true);
+    expect(routeLabel(restored)).toBe('HTTP 10.23.5.189:3359');
+  });
   it('validates proxy and hops', () => {
     expect(validateNetwork(emptyNetwork())).toEqual([]);
     const n = { ...emptyNetwork(), useProxy: true, proxy: { type: 'socks' as const, host: 'a/b', port: '0', username: '', password: 'x' } };

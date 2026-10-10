@@ -4,8 +4,10 @@ use crate::error::AppError;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashSet,
     path::Path,
     process::{Child, Command},
+    sync::{Arc, RwLock},
     time::Duration,
 };
 use tokio::{
@@ -19,9 +21,32 @@ pub const CREDENTIAL_KEY: &str = "proxy.sso.credentials";
 pub const DEFAULT_PROXY_URL: &str = "http://10.23.5.189:3359";
 pub const DEFAULT_PROXY_USERNAME: &str = "de_team";
 
+/// Match a DNS suffix on a label boundary, including an optional trailing DNS dot.
+pub fn direct_api_host(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    host == "vnpayapi.vn" || host.ends_with(".vnpayapi.vn")
+}
+
 /// Password is supplied by the build environment, never by the WebView or public API.
 pub fn default_proxy_password() -> &'static str {
     option_env!("TABLEDB_SSO_PROXY_PASSWORD").unwrap_or("")
+}
+
+/// Resolve the built-in DB proxy inside the native core; never expose its password to the WebView.
+pub fn database_proxy_params(method: &str, mut params: serde_json::Value, password: &str) -> Result<serde_json::Value, AppError> {
+    if matches!(method, "session.open" | "session.test") {
+        if let Some(proxy) = params.pointer_mut("/profile/options/proxy") {
+            if proxy.get("useDefault").and_then(serde_json::Value::as_bool) == Some(true) {
+                if password.is_empty() {
+                    return Err(AppError::new("E_PROXY_AUTH_REQUIRED", "Default database proxy password is missing from this desktop build"));
+                }
+                *proxy = serde_json::json!({"type":"http","host":"10.23.5.189","port":3359,"username":DEFAULT_PROXY_USERNAME,"password":password});
+            } else if let Some(object) = proxy.as_object_mut() {
+                object.remove("useDefault");
+            }
+        }
+    }
+    Ok(params)
 }
 
 #[derive(Deserialize)]
@@ -247,17 +272,54 @@ async fn tunnel(
     upstream: &Url,
     auth: Option<&str>,
     hosts: &[String],
+    extra_targets: &RwLock<HashSet<String>>,
 ) -> std::io::Result<()> {
     let header = read_header(&mut client).await?;
-    let Some(target) = connect_target(&header, hosts) else {
-        log::warn!("SSO proxy rejected CONNECT target or request");
+    let target = connect_target(&header, hosts).or_else(|| {
+        let text = std::str::from_utf8(&header).ok()?;
+        let mut parts = text.lines().next()?.split_whitespace();
+        if parts.next()? != "CONNECT" { return None; }
+        let authority = parts.next()?.to_ascii_lowercase();
+        if !matches!(parts.next()?, "HTTP/1.0" | "HTTP/1.1") || parts.next().is_some() { return None; }
+        extra_targets.read().ok()?.contains(&authority).then_some(authority)
+    });
+    let Some(target) = target else {
+        log::warn!("network.connect rejected source=local_bridge status=403 request_line={:?}", crate::redact::redact(&String::from_utf8_lossy(&header).lines().next().unwrap_or("").chars().take(512).collect::<String>()));
         client
             .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             .await?;
         return Ok(());
     };
-    // Only the validated host and port are logged; never auth or full login URLs.
-    log::info!("SSO proxy CONNECT via upstream: {target}");
+    let host = target.rsplit_once(':').map(|(h, _)| h).unwrap_or("");
+    let direct = direct_api_host(host);
+    // Only the validated destination is logged; credentials never go to direct targets.
+    log::info!("network.connect request method=CONNECT url=https://{target}/ route={} proxy={}:{}", if direct { "direct" } else { "proxy" }, upstream.host_str().unwrap_or(""), upstream.port_or_known_default().unwrap_or(0));
+    let started = std::time::Instant::now();
+    let mut remote = match connect_remote(&target, direct, upstream, auth).await {
+        Ok(remote) => remote,
+        Err(error) => {
+            log::warn!("network.connect failed url=https://{target}/ route={} elapsed_ms={} error_kind={:?} error={:?}", if direct { "direct" } else { "proxy" }, started.elapsed().as_millis(), error.kind(), error.to_string());
+            client.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
+            return Err(error);
+        }
+    };
+    client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await?;
+    log::info!("network.connect established url=https://{target}/ route={} peer={:?} elapsed_ms={}", if direct { "direct" } else { "proxy" }, remote.peer_addr().ok(), started.elapsed().as_millis());
+    let database_route = !extra_targets.read().unwrap().is_empty();
+    if database_route {
+        // JDBC may reuse a keep-alive socket for many queries. Its owning session closes the bridge.
+        let _ = tokio::io::copy_bidirectional(&mut client, &mut remote).await;
+    } else {
+        let _ = tokio::time::timeout(Duration::from_secs(600), tokio::io::copy_bidirectional(&mut client, &mut remote)).await;
+    }
+    Ok(())
+}
+
+async fn connect_remote(target: &str, direct: bool, upstream: &Url, auth: Option<&str>) -> std::io::Result<TcpStream> {
+    if direct {
+        return tokio::time::timeout(Duration::from_secs(15), TcpStream::connect(target)).await
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "stage=destination_tcp direct destination timeout"))?;
+    }
     let mut remote = tokio::time::timeout(
         Duration::from_secs(15),
         TcpStream::connect((
@@ -266,7 +328,7 @@ async fn tunnel(
         )),
     )
     .await
-    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "upstream proxy timeout"))??;
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "stage=proxy_tcp upstream proxy timeout"))??;
     let auth_header = auth
         .map(|a| format!("Proxy-Authorization: Basic {a}\r\n"))
         .unwrap_or_default();
@@ -281,34 +343,27 @@ async fn tunnel(
         .and_then(|s| s.lines().next())
         .and_then(|s| s.split_whitespace().nth(1))
         .unwrap_or("");
+    let response_text = String::from_utf8_lossy(&response);
+    let safe_headers: Vec<&str> = response_text.lines().skip(1).filter(|line| {
+        let name = line.split(':').next().unwrap_or("");
+        ["server", "via", "x-squid-error", "content-type", "content-length"].iter().any(|allowed| name.eq_ignore_ascii_case(allowed))
+    }).collect();
+    log::info!("network.connect response source=upstream_proxy url=https://{target}/ proxy={}:{} status={} headers={:?}",
+        upstream.host_str().unwrap_or(""), upstream.port_or_known_default().unwrap_or(0), status, safe_headers);
     if status != "200" {
         log::warn!(
             "SSO proxy refused CONNECT to {target} (status {})",
             status.parse::<u16>().unwrap_or(0)
         );
-        client
-            .write_all(
-                b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            )
-            .await?;
-        return Ok(());
+        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, format!("stage=proxy_connect upstream CONNECT status {status} destination={target}")));
     }
-    client
-        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        .await?;
-    log::info!("SSO proxy tunnel established: {target}");
-    // TLS stays end-to-end between the browser and destination; only CONNECT uses proxy auth.
-    let _ = tokio::time::timeout(
-        Duration::from_secs(600),
-        tokio::io::copy_bidirectional(&mut client, &mut remote),
-    )
-    .await;
-    Ok(())
+    Ok(remote)
 }
 
 pub struct LoginProxy {
     pub url: Url,
     task: JoinHandle<()>,
+    extra_targets: Arc<RwLock<HashSet<String>>>,
 }
 
 impl LoginProxy {
@@ -322,6 +377,8 @@ impl LoginProxy {
             .filter_map(|s| Url::parse(s).ok()?.host_str().map(str::to_string))
             .collect();
         let auth = credentials.map(|c| STANDARD.encode(format!("{}:{}", c.username, c.password)));
+        let extra_targets = Arc::new(RwLock::new(HashSet::new()));
+        let task_targets = extra_targets.clone();
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .map_err(|_| AppError::new("E_PROXY_LISTEN", "cannot start SSO proxy bridge"))?;
@@ -339,10 +396,10 @@ impl LoginProxy {
                     accepted = listener.accept() => {
                         let Ok((client, _)) = accepted else { break; };
                         if connections.len() >= 64 { continue; }
-                        let (upstream, auth, hosts) = (upstream.clone(), auth.clone(), hosts.clone());
+                        let (upstream, auth, hosts, targets) = (upstream.clone(), auth.clone(), hosts.clone(), task_targets.clone());
                         connections.spawn(async move {
-                            if tunnel(client, &upstream, auth.as_deref(), &hosts).await.is_err() {
-                                log::warn!("SSO proxy connection failed");
+                            if let Err(error) = tunnel(client, &upstream, auth.as_deref(), &hosts, &targets).await {
+                                log::warn!("SSO connection failed: {error}");
                             }
                         });
                     }
@@ -350,7 +407,17 @@ impl LoginProxy {
                 }
             }
         });
-        Ok(Self { url, task })
+        Ok(Self { url, task, extra_targets })
+    }
+
+    /// Allow the explicitly configured Trino coordinator, including a non-default TLS port.
+    pub fn allow_coordinator(&self, host: &str, port: u16) -> Result<(), AppError> {
+        let url = Url::parse(&format!("https://{host}:{port}/")).map_err(|_| AppError::bad_request("invalid Trino coordinator"))?;
+        if port == 0 || !url.username().is_empty() || url.password().is_some() || url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
+            return Err(AppError::bad_request("invalid Trino coordinator"));
+        }
+        self.extra_targets.write().unwrap().insert(format!("{}:{port}", host.to_ascii_lowercase()));
+        Ok(())
     }
 }
 
@@ -362,6 +429,9 @@ impl Drop for LoginProxy {
 
 /// A dedicated browser process/profile avoids changing the user's normal browser proxy settings.
 pub struct LoginBrowser(Child);
+impl LoginBrowser {
+    pub fn running(&mut self) -> bool { matches!(self.0.try_wait(), Ok(None)) }
+}
 impl Drop for LoginBrowser {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -452,6 +522,57 @@ pub fn open_browser(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn vnpay_api_suffix_is_direct_only_on_dns_label_boundaries() {
+        for host in ["vnpayapi.vn", "query-engine-staging.vnpayapi.vn", "GENAI.VNPAYAPI.VN."] { assert!(direct_api_host(host)); }
+        for host in ["s2o.vnpay.vn", "accounts.google.com", "vnpayapi.vn.evil.com", "evilvnpayapi.vn"] { assert!(!direct_api_host(host)); }
+    }
+
+    #[tokio::test]
+    async fn direct_connection_never_sends_connect_or_proxy_credentials() {
+        let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = origin.local_addr().unwrap().to_string();
+        let proxy_url = Url::parse(&format!("http://{}", proxy.local_addr().unwrap())).unwrap();
+        let mut remote = connect_remote(&target, true, &proxy_url, Some("private-proxy-auth")).await.unwrap();
+        let (mut received, _) = origin.accept().await.unwrap();
+        remote.write_all(b"TLS_PAYLOAD").await.unwrap();
+        let mut data = [0; 11];
+        received.read_exact(&mut data).await.unwrap();
+        assert_eq!(&data, b"TLS_PAYLOAD");
+        assert!(tokio::time::timeout(Duration::from_millis(100), proxy.accept()).await.is_err());
+    }
+    #[tokio::test]
+    async fn proxy_denial_identifies_stage_destination_and_status() {
+        let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = Url::parse(&format!("http://{}", proxy.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = proxy.accept().await.unwrap();
+            let request = read_header(&mut socket).await.unwrap();
+            assert!(String::from_utf8_lossy(&request).starts_with("CONNECT accounts.google.com:443 "));
+            socket.write_all(b"HTTP/1.1 403 Forbidden\r\nX-Squid-Error: ERR_ACCESS_DENIED 0\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+        });
+        let error = connect_remote("accounts.google.com:443", false, &url, None).await.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("stage=proxy_connect"));
+        assert!(error.to_string().contains("403"));
+        assert!(error.to_string().contains("accounts.google.com:443"));
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn database_default_proxy_is_resolved_only_in_native_session_requests() {
+        let params = serde_json::json!({"profile":{"options":{"proxy":{"useDefault":true,"host":"other-host","password":"webview-password"}}}});
+        for method in ["session.open", "session.test"] {
+            let resolved = database_proxy_params(method, params.clone(), "native-password").unwrap();
+            assert_eq!(resolved.pointer("/profile/options/proxy/host").unwrap(), "10.23.5.189");
+            assert_eq!(resolved.pointer("/profile/options/proxy/username").unwrap(), "de_team");
+            assert_eq!(resolved.pointer("/profile/options/proxy/password").unwrap(), "native-password");
+            assert!(resolved.pointer("/profile/options/proxy/useDefault").is_none());
+            assert_eq!(database_proxy_params(method, params.clone(), "").unwrap_err().code, "E_PROXY_AUTH_REQUIRED");
+        }
+        assert_eq!(database_proxy_params("query.execute", params.clone(), "native-password").unwrap(), params);
+    }
     use super::*;
 
     #[test]
@@ -615,6 +736,7 @@ mod tests {
             "lh3.googleusercontent.com:443",
             "s2o.vnpay.vn:443",
             "genai.vnpay.vn:443",
+            "trino.internal:8443",
         ];
         let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let upstream_url =
@@ -644,6 +766,7 @@ mod tests {
         )
         .await
         .unwrap();
+        bridge.allow_coordinator("trino.internal", 8443).unwrap();
         for target in targets {
             let mut client = TcpStream::connect(("127.0.0.1", bridge.url.port().unwrap()))
                 .await

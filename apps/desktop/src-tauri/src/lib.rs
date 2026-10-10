@@ -10,6 +10,7 @@ pub mod error;
 pub mod genai;
 pub mod genai_internal;
 pub mod login_proxy;
+pub mod trino_routes;
 pub mod oidc;
 pub mod redact;
 pub mod secrets;
@@ -126,6 +127,7 @@ pub fn run() {
                 agent_config: std::sync::RwLock::new(None),
                 config_error: cfg_err,
                 sidecar: mgr,
+                trino_routes: tokio::sync::Mutex::new(crate::trino_routes::TrinoRoutes::default()),
                 oidc_busy: AtomicBool::new(false),
                 genai_cancel: std::sync::Mutex::new(None),
                 custom_drivers_dir,
@@ -138,7 +140,7 @@ pub fn run() {
 
             // ---- main window, created in code so we can pin navigation to the app origin ----
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-                .title("VNPAY TableDB")
+                .title(format!("VNPAY TableDB {}", app.package_info().version))
                 .inner_size(1360.0, 860.0)
                 .min_inner_size(1024.0, 640.0)
                 .on_navigation(navigation_allowed)

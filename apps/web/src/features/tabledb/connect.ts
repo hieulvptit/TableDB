@@ -57,7 +57,10 @@ export interface ConnectCallbacks { onSsoUrl?: (url: string) => void }
 
 function watchSso(cb?: ConnectCallbacks): (e: GatewayEvent) => void {
   return (e) => {
-    if (e.event === 'auth.openUrl' && typeof e.data?.url === 'string') { cb?.onSsoUrl?.(e.data.url); openExternalUrl(e.data.url); }
+    if (e.event === 'auth.openUrl' && typeof e.data?.url === 'string') {
+      cb?.onSsoUrl?.(e.data.url);
+      if (e.data.browserHandled !== true) openExternalUrl(e.data.url);
+    }
   };
 }
 

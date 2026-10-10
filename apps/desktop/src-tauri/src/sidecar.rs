@@ -563,7 +563,7 @@ async fn read_stdout(mgr: Arc<SidecarManager>, stdout: tokio::process::ChildStdo
 async fn read_stderr(stderr: tokio::process::ChildStderr) {
     let mut lines = BufReader::new(stderr).lines();
     while let Ok(Some(l)) = lines.next_line().await {
-        let l: String = l.chars().take(1000).collect();
+        let l: String = l.chars().take(8192).collect();
         log::info!(target: "sidecar", "{}", redact(&l));
     }
 }
