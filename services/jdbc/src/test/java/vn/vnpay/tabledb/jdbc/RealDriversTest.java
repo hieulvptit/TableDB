@@ -133,8 +133,24 @@ class RealDriversTest {
 
         int port() { return server.getAddress().getPort(); }
 
+        final java.util.concurrent.atomic.AtomicInteger headRequests = new java.util.concurrent.atomic.AtomicInteger();
+        final java.util.concurrent.atomic.AtomicInteger postRequests = new java.util.concurrent.atomic.AtomicInteger();
+        volatile boolean rejectQueries;
+
         void statement(HttpExchange ex) throws IOException {
             ex.getRequestBody().readAllBytes();
+            if (ex.getRequestMethod().equals("HEAD")) {
+                headRequests.incrementAndGet();
+                ex.sendResponseHeaders(405, -1);
+                ex.close();
+                return;
+            }
+            postRequests.incrementAndGet();
+            if (rejectQueries) {
+                ex.sendResponseHeaders(403, -1);
+                ex.close();
+                return;
+            }
             String auth = ex.getRequestHeaders().getFirst("Authorization");
             if (auth == null || !auth.equals("Bearer tok-123")) {
                 ex.getResponseHeaders().add("WWW-Authenticate", "Bearer x_redirect_server=\"https://127.0.0.1:" + port() + "/redirect/abc\", x_token_server=\"https://127.0.0.1:" + port() + "/token/abc\"");
@@ -142,8 +158,8 @@ class RealDriversTest {
                 ex.close();
                 return;
             }
-            String body = "{\"id\":\"q1\",\"infoUri\":\"https://127.0.0.1:" + port() + "/ui/q1\",\"columns\":[{\"name\":\"_col0\",\"type\":\"varchar\","
-                    + "\"typeSignature\":{\"rawType\":\"varchar\",\"arguments\":[]}}],\"data\":[[\"fake-trino\"]],"
+            String body = "{\"id\":\"q1\",\"infoUri\":\"https://127.0.0.1:" + port() + "/ui/q1\",\"columns\":[{\"name\":\"_col0\",\"type\":\"bigint\","
+                    + "\"typeSignature\":{\"rawType\":\"bigint\",\"arguments\":[]}}],\"data\":[[1]],"
                     + "\"stats\":{\"state\":\"FINISHED\",\"queued\":false,\"scheduled\":true,\"nodes\":1,\"totalSplits\":1,\"queuedSplits\":0,\"runningSplits\":0,"
                     + "\"completedSplits\":1,\"cpuTimeMillis\":0,\"wallTimeMillis\":0,\"queuedTimeMillis\":0,\"elapsedTimeMillis\":0,\"processedRows\":1,"
                     + "\"processedBytes\":1,\"physicalInputBytes\":1,\"peakMemoryBytes\":1,\"spilledBytes\":0},\"warnings\":[]}";
@@ -201,6 +217,21 @@ class RealDriversTest {
             assertEquals("trino-sso", data.get("purpose"));
             assertEquals("https://127.0.0.1:" + fc.port() + "/redirect/abc", data.get("url"));
             assertTrue(fc.tokenPolls.get() >= 1);
+            assertEquals(0, fc.headRequests.get(), "HEAD must not be used on coordinators returning 405");
+            assertTrue(fc.postRequests.get() >= 2, "the open probe must authenticate and execute through POST");
+        }
+    }
+
+    @Test void trinoOpenRejectsFailedPostProbeWithoutRegisteringSession() throws Exception {
+        try (FakeCoordinator fc = new FakeCoordinator(tmp)) {
+            fc.rejectQueries = true;
+            var result = rpc("session.open", "profile", profile("trino", fc.port(),
+                    new LinkedHashMap<>(Map.of("type", "trino-external")),
+                    new LinkedHashMap<>(Map.of("ssl", true, "externalAuthTimeoutSec", 10L))));
+            assertTrue(result.containsKey("error"), result.toString());
+            assertEquals(0, fc.headRequests.get());
+            assertTrue(fc.postRequests.get() > 0);
+            assertEquals(0, d.sessions().sessionCount());
         }
     }
 

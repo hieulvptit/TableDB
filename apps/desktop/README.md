@@ -50,7 +50,7 @@ Logs: `%LOCALAPPDATA%\vn.vnpay.tabledb\logs\tabledb.log` (5 MB rotation, keep 5)
 (bearer/JWT, `password|token|secret|code_verifier…=` pairs, `code`/`state` URL params, URL userinfo).
 
 Connection tests and opens log `db.connect request/dialing/success/failed` at INFO/WARN: connection ID, target host/port,
-TLS/auth mode, proxy/SSH route, stage, elapsed time and nested JDBC/network causes. Trino additionally logs BASIC HTTP
+TLS/auth mode, proxy/SSH route, stage, elapsed time and nested JDBC/network causes. Trino validates the connection and triggers authentication with a `SELECT 1` POST probe at open, avoiding HEAD validation that older coordinators or ingress rules may reject with HTTP 405. Trino additionally logs BASIC HTTP
 request URLs and response status/timing through sidecar stderr; headers, SQL bodies and rows are omitted. URL query
 parameters are redacted in desktop logs. On the jump machine reproduce with **Test connection** and inspect `tabledb.log`.
 Pasting an `https://` endpoint sets port 443 and enables TLS; an explicit port is preserved. New connections default to Trino.

@@ -38,7 +38,9 @@ public final class TrinoVendor extends Vendor {
         Properties pr = new Properties();
         pr.setProperty("user", p.username != null ? p.username : "tabledb");
         pr.setProperty("SSL", Boolean.toString(p.ssl));
-        pr.setProperty("validateConnection", "true"); // run a probe at open so auth happens in session.open
+        // HEAD validation is unsupported by older coordinators and some ingress configurations.
+        // Authenticate and verify connectivity with a normal query before returning the session.
+        pr.setProperty("validateConnection", "false");
         // Driver logs request URL, HTTP response status and timing to sidecar stderr.
         // BASIC omits headers, SQL request bodies and result data.
         pr.setProperty("httpLoggingLevel", "BASIC");
@@ -62,7 +64,23 @@ public final class TrinoVendor extends Vendor {
 
     @Override public Connection connect(DriverShim driver, Profile p) throws SQLException {
         if (p.authType.equals("trino-external")) installRedirectHook(driver.loader());
-        return super.connect(driver, p);
+        Connection connection = super.connect(driver, p);
+        try {
+            Log.info("trino.connect probe connection_id=" + Session.CURRENT.get()
+                    + " method=POST url=" + (p.ssl ? "https://" : "http://") + p.host + ":" + p.port
+                    + "/v1/statement query=SELECT_1");
+            try (Statement statement = connection.createStatement()) {
+                statement.setQueryTimeout(p.authType.equals("trino-external")
+                        ? Math.max(p.connectTimeoutSec, p.externalAuthTimeoutSec) : p.connectTimeoutSec);
+                try (ResultSet result = statement.executeQuery("SELECT 1")) {
+                    if (!result.next()) throw new SQLException("Trino connection probe returned no rows", "08001");
+                }
+            }
+            return connection;
+        } catch (SQLException | RuntimeException error) {
+            try { connection.close(); } catch (SQLException closeError) { error.addSuppressed(closeError); }
+            throw error;
+        }
     }
 
     /** Route the driver's SSO redirect to an auth.openUrl event for the session bound to the calling thread. */
